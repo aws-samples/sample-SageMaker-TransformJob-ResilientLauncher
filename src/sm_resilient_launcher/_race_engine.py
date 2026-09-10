@@ -201,10 +201,16 @@ class RaceEngine:
             A LaunchResult if the job completed, or None if it failed.
         """
         self._adapter.create_job(job_name, instance_type, boto3_params)
+        logger.info("Submitted %s (%s)", job_name, instance_type)
 
         while True:
             desc = self._adapter.describe_job(job_name)
             if self._adapter.is_completed(desc):
+                logger.info(
+                    "Winner found: %s (%s) completed",
+                    job_name,
+                    instance_type,
+                )
                 return LaunchResult(
                     job_name=job_name,
                     instance_type_used=instance_type,
@@ -213,6 +219,13 @@ class RaceEngine:
                     strategy_used="race",
                 )
             if self._adapter.is_failed(desc):
+                error_msg = self._adapter.extract_error(desc)
+                logger.info(
+                    "%s (%s) failed: %s",
+                    instance_type,
+                    job_name[:20],
+                    error_msg[:60],
+                )
                 return None
             time.sleep(_POLL_INTERVAL_SECONDS)
 

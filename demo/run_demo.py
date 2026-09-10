@@ -575,25 +575,23 @@ def run_ai_expansion(input_uri: str):
     # Ensure original type is included
     if scalar_type not in candidates:
         candidates.insert(0, scalar_type)
-    print(f"  GPU types in account (from Service Quotas API): {len(candidates)} types")
+    print(f"  GPU types in account (from Service Quotas API): {len(candidates)} types found")
     for t in candidates:
         print(f"    {t}")
     print()
 
-    # ── Step 2: Fetch quotas and pricing (deterministic) ──
+    # ── Step 2: Fetch quotas (deterministic) ──
 
     quotas = quota_fetcher.fetch_quotas(candidates)
-    prices = pricing_fetcher.fetch_prices(candidates)
-    print(f"  Quotas (non-zero):")
-    for t, q in sorted(quotas.items()):
-        if q and q > 0:
-            print(f"    {t}: {q}")
-    print(f"  Prices: {prices}")
+    non_zero = {t: q for t, q in quotas.items() if q and q > 0}
+    print(f"  Types with quota > 0: {len(non_zero)}")
+    for t, q in sorted(non_zero.items()):
+        print(f"    {t}: quota={q}")
     print()
 
     # ── Step 3: Build and show the prompt ──
 
-    prompt = router._build_prompt(scalar_type, candidates, workload_desc, quotas, prices)
+    prompt = router._build_prompt(scalar_type, candidates, workload_desc, quotas)
     print("  Prompt sent to Bedrock:")
     print("  " + "\u2500" * 60)
     for line in prompt.split("\n"):
