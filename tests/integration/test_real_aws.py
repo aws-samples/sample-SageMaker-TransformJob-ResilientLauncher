@@ -1,18 +1,27 @@
 #!/usr/bin/env python3
 """Real AWS integration tests for sm-resilient-launcher.
 
-Standalone script (not pytest) that runs against account 347323572974
-in us-east-1.  Each test uses a live SageMaker Batch Transform job with
-an existing XGBoost model and real GPU instances.
+Standalone script (not pytest) that runs real SageMaker Batch Transform
+jobs against your AWS account.  Each test uses a live job with an
+existing model and real GPU instances.
 
 Usage:
+    # Set required environment variables first:
+    export SM_TEST_MODEL_NAME=my-model
+    export SM_TEST_ROLE_ARN=arn:aws:iam::123456789012:role/SageMakerRole
+    export SM_TEST_S3_BUCKET=sagemaker-us-east-1-123456789012
+
+    # Optional:
+    export SM_TEST_REGION=us-east-1              # default: us-east-1
+    export SM_TEST_CROSS_REGION=us-west-2        # default: us-west-2
+    export SM_TEST_CROSS_REGION_MODEL=my-model-uswest2  # for cross-region test
+
     python tests/integration/test_real_aws.py          # all tests
     python tests/integration/test_real_aws.py 1 3 7    # specific tests
 
 Prerequisites:
     pip install -e .
-    AWS credentials for account 347323572974
-    Region us-east-1 configured (aws configure)
+    AWS credentials configured for the target account and region.
 
 Estimated cost: ~$3-5 (each GPU job runs 1-2 minutes).
 """
@@ -21,6 +30,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import sys
 import time
 import traceback
@@ -38,23 +48,32 @@ from sm_resilient_launcher import (
     prepare_regions,
 )
 
-# ── Constants ──────────────────────────────────────────────────
-ACCOUNT_ID = "347323572974"
-HOME_REGION = "us-east-1"
+# ── Configuration (via environment variables) ──────────────────
+# Set these before running integration tests:
+#   export SM_TEST_REGION=us-east-1
+#   export SM_TEST_MODEL_NAME=my-model
+#   export SM_TEST_ROLE_ARN=arn:aws:iam::123456789012:role/SageMakerRole
+#   export SM_TEST_S3_BUCKET=sagemaker-us-east-1-123456789012
+#   export SM_TEST_CROSS_REGION=us-west-2
+#   export SM_TEST_CROSS_REGION_MODEL=my-model-uswest2
 
-MODEL_NAME = "DEMO3-xgboost-classification2022-11-05-02-48-00-mod"
-IMAGE_URI = "811284229777.dkr.ecr.us-east-1.amazonaws.com/xgboost:latest"
-MODEL_ARTIFACT = (
-    "s3://sagemaker-us-east-1-347323572974/"
-    "XGboost/xgboost-single-2/"
-    "DEMO3-xgboost-classification2022-11-05-02-48-00/"
-    "output/model.tar.gz"
-)
-ROLE_ARN = (
-    "arn:aws:iam::347323572974:role/service-role/"
-    "AmazonSageMaker-ExecutionRole-20200813T131433"
-)
-S3_BUCKET = "sagemaker-us-east-1-347323572974"
+
+def _require_env(name: str) -> str:
+    """Get a required environment variable or exit with a clear message."""
+    value = os.environ.get(name)
+    if not value:
+        print(f"ERROR: Required environment variable {name} is not set.")
+        print(f"See the docstring at the top of this file for setup instructions.")
+        sys.exit(1)
+    return value
+
+
+HOME_REGION = os.environ.get("SM_TEST_REGION", "us-east-1")
+MODEL_NAME = _require_env("SM_TEST_MODEL_NAME")
+ROLE_ARN = _require_env("SM_TEST_ROLE_ARN")
+S3_BUCKET = _require_env("SM_TEST_S3_BUCKET")
+CROSS_REGION = os.environ.get("SM_TEST_CROSS_REGION", "us-west-2")
+CROSS_REGION_MODEL = os.environ.get("SM_TEST_CROSS_REGION_MODEL", "")
 
 # Test CSV: 5 rows, 7 numeric features (XGBoost inference — no label column).
 # The model was trained with 7 features; inference input must match.
@@ -446,25 +465,31 @@ def test_5_all_types_exhausted(input_uri: str) -> tuple[bool, str]:
 def test_6_multi_region(input_uri: str) -> tuple[bool, str]:
     """Test 6: Multi-region fallback.
 
-    InstanceType=["ml.g4dn.4xlarge"] with AllowedRegions=["us-east-1", "us-west-2"].
-    g4dn.4xlarge has quota=0 in us-east-1, so it should fail there.
-    g4dn.xlarge has quota=1 in us-west-2 but we're using g4dn.4xlarge which has quota=0 everywhere.
-
-    Adjusted approach: use g4dn.xlarge which has quota=2 in us-east-1 and
-    quota=1 in us-west-2. The job should succeed in us-east-1 first.
-    We exercise the cross-region code path by verifying the SDK accepts
+    Uses CROSS_REGION and CROSS_REGION_MODEL env vars.
+    Exercises the cross-region code path by verifying the SDK accepts
     the AllowedRegions param and routes correctly.
     """
     _print_header(6, "Multi-region fallback")
+
+    if not CROSS_REGION_MODEL:
+        print("  SKIPPED: SM_TEST_CROSS_REGION_MODEL is not set.")
+        print("  Set this env var to a SageMaker Model name in the cross-region account")
+        print(f"  (region: {CROSS_REGION}) to enable this test.")
+        return True, "SKIPPED (SM_TEST_CROSS_REGION_MODEL not set)"
+
     name = _job_name("multi-region")
 
-    # Use a type that works in us-east-1 to verify the multi-region code path
+    # Use a type that works in the home region to verify the multi-region code path
     params = _make_boto3_params(name, "ml.g4dn.xlarge", input_uri)
-    params["AllowedRegions"] = ["us-east-1", "us-west-2"]
+    params["AllowedRegions"] = [HOME_REGION, CROSS_REGION]
+    params["RegionConfig"] = {
+        CROSS_REGION: {"ModelName": CROSS_REGION_MODEL},
+    }
 
     print(f"  Launching: {name}")
-    print("    Scalar ml.g4dn.xlarge, AllowedRegions=[us-east-1, us-west-2]")
-    print("    Expect: sequential across regions, should succeed in us-east-1")
+    print(f"    Scalar ml.g4dn.xlarge, AllowedRegions=[{HOME_REGION}, {CROSS_REGION}]")
+    print(f"    Cross-region model: {CROSS_REGION_MODEL}")
+    print(f"    Expect: sequential across regions, should succeed in {HOME_REGION}")
 
     result = launch_create_transform_job(**params)
     _created_jobs.append(result.job_name)
@@ -473,11 +498,11 @@ def test_6_multi_region(input_uri: str) -> tuple[bool, str]:
         return False, f"Expected LaunchResult, got {type(result).__name__}"
     _print_result("Returns LaunchResult", True)
 
-    region_ok = result.region_used in ("us-east-1", "us-west-2")
+    region_ok = result.region_used in (HOME_REGION, CROSS_REGION)
     _print_result(
         f"region_used={result.region_used}",
         region_ok,
-        "expected us-east-1 or us-west-2",
+        f"expected {HOME_REGION} or {CROSS_REGION}",
     )
 
     type_ok = result.instance_type_used == "ml.g4dn.xlarge"
@@ -508,21 +533,26 @@ def test_6_multi_region(input_uri: str) -> tuple[bool, str]:
 def test_7_prepare_regions() -> tuple[bool, str]:
     """Test 7: prepare_regions utility.
 
-    Call prepare_regions with us-west-2 as target.
+    Uses CROSS_REGION env var as the target region.
     Verify the ReadinessReport structure.
     """
     _print_header(7, "prepare_regions utility")
 
+    if not CROSS_REGION_MODEL:
+        print("  SKIPPED: SM_TEST_CROSS_REGION_MODEL is not set.")
+        print("  Set this env var to enable cross-region tests.")
+        return True, "SKIPPED (SM_TEST_CROSS_REGION_MODEL not set)"
+
     print("  Calling prepare_regions(")
     print(f"    home_region='{HOME_REGION}',")
-    print(f"    target_regions=['us-west-2'],")
+    print(f"    target_regions=['{CROSS_REGION}'],")
     print(f"    model_name='{MODEL_NAME}',")
     print(f"    role_arn='{ROLE_ARN}'")
     print("  )")
 
     report = prepare_regions(
         home_region=HOME_REGION,
-        target_regions=["us-west-2"],
+        target_regions=[CROSS_REGION],
         model_name=MODEL_NAME,
         role_arn=ROLE_ARN,
     )
@@ -535,7 +565,7 @@ def test_7_prepare_regions() -> tuple[bool, str]:
         return False, "Empty ReadinessReport"
 
     r = report.regions[0]
-    region_ok = r.region == "us-west-2"
+    region_ok = r.region == CROSS_REGION
     _print_result(f"region={r.region}", region_ok)
 
     # S3 status should be "ready" or "created"
@@ -574,9 +604,10 @@ ALL_TESTS = {
 def main():
     print("=" * 70)
     print("  sm-resilient-launcher — Real AWS Integration Tests")
-    print(f"  Account: {ACCOUNT_ID}  Region: {HOME_REGION}")
+    print(f"  Region: {HOME_REGION}  Model: {MODEL_NAME}")
+    print(f"  S3 Bucket: {S3_BUCKET}")
+    print(f"  Cross-Region: {CROSS_REGION}  Cross-Region Model: {CROSS_REGION_MODEL or '(not set)'}")
     print(f"  Run ID:  {_run_id}")
-    print(f"  Model:   {MODEL_NAME}")
     print("=" * 70)
 
     # Parse requested test numbers from CLI args
