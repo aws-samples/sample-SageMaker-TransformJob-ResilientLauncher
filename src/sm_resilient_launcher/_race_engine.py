@@ -200,8 +200,13 @@ class RaceEngine:
         Returns:
             A LaunchResult if the job completed, or None if it failed.
         """
-        self._adapter.create_job(job_name, instance_type, boto3_params)
-        logger.info("Submitted %s (%s)", job_name, instance_type)
+        logger.info("Submitting %s...", instance_type)
+        try:
+            self._adapter.create_job(job_name, instance_type, boto3_params)
+        except Exception as exc:
+            logger.info("%s failed to submit: %s", instance_type, str(exc)[:60])
+            raise
+        logger.info("%s submitted, polling...", instance_type)
 
         while True:
             desc = self._adapter.describe_job(job_name)
