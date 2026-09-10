@@ -207,8 +207,7 @@ class RaceEngine:
             desc = self._adapter.describe_job(job_name)
             if self._adapter.is_completed(desc):
                 logger.info(
-                    "Winner found: %s (%s) completed",
-                    job_name,
+                    "Winner: %s completed",
                     instance_type,
                 )
                 return LaunchResult(
@@ -221,12 +220,14 @@ class RaceEngine:
             if self._adapter.is_failed(desc):
                 error_msg = self._adapter.extract_error(desc)
                 logger.info(
-                    "%s (%s) failed: %s",
+                    "%s failed: %s",
                     instance_type,
-                    job_name[:20],
-                    error_msg[:60],
+                    error_msg[:50],
                 )
                 return None
+            # Log periodic status
+            status = desc.get("TransformJobStatus", "unknown")
+            logger.info("%s: %s", instance_type, status)
             time.sleep(_POLL_INTERVAL_SECONDS)
 
     def _pick_winner(

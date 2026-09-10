@@ -42,17 +42,17 @@ if not MODEL_NAME or not S3_BUCKET:
     sys.exit(1)
 
 # Instance types for the demo
-STANDARD_TYPES = ["ml.g5.4xlarge", "ml.g5.2xlarge"]  # both quota=0, will fail
-SDK_TYPES = ["ml.g5.4xlarge", "ml.g5.2xlarge", "ml.g4dn.xlarge"]  # includes fallback
+STANDARD_TYPES = ["ml.g6.12xlarge", "ml.g5.4xlarge"]
+SDK_TYPES = ["ml.g6.12xlarge", "ml.g5.4xlarge", "ml.g4dn.xlarge"]
 
 STANDARD_NOTES = {
-    "ml.g5.4xlarge": "preferred, but quota=0",
-    "ml.g5.2xlarge": "backup, but quota=0",
+    "ml.g6.12xlarge": "quota=0, will fail",
+    "ml.g5.4xlarge": "quota=1, should work",
 }
 SDK_NOTES = {
-    "ml.g5.4xlarge": "preferred, but quota=0",
-    "ml.g5.2xlarge": "backup, but quota=0",
-    "ml.g4dn.xlarge": "available, quota=1",
+    "ml.g6.12xlarge": "quota=0, will fail",
+    "ml.g5.4xlarge": "quota=1",
+    "ml.g4dn.xlarge": "quota=2",
 }
 
 # Test CSV
@@ -62,7 +62,7 @@ TEST_CSV = (
     "3.0,2.8,1.2,4.5,1.0,2.1,3.3\n"
 )
 
-W = 42  # Column width for the split-screen display
+W = 50  # Column width for the split-screen display
 
 # ── Display helpers ────────────────────────────────────────────
 
@@ -306,9 +306,10 @@ def run_sdk(
             # Filter for interesting messages
             if any(kw in msg.lower() for kw in [
                 "failed", "cancel", "winner", "skipping", "moving",
-                "exhausted", "capacity", "quota",
+                "exhausted", "capacity", "quota", "submitted",
+                "completed", "inprogress", "provisioning",
             ]):
-                short_msg = msg[:38]
+                short_msg = msg[:46]
                 with lock:
                     events.append(("right", f"[{elapsed:>3}s] {short_msg}"))
 
@@ -717,8 +718,8 @@ def main():
     print(f"  Bucket:      {S3_BUCKET}")
     print(f"  Types:       {types_display}")
     print()
-    print("  LEFT  (standard): g5.4xlarge \u2192 fail \u2192 manual retry \u2192 g5.2xlarge \u2192 fail \u2192 STUCK")
-    print("  RIGHT (SDK):      all 3 raced, g4dn.xlarge wins automatically")
+    print("  LEFT  (standard): g6.12xlarge \u2192 fail \u2192 manual retry \u2192 g5.4xlarge")
+    print("  RIGHT (SDK):      all 3 raced in parallel, first to complete wins")
     print()
 
     # Upload test data
