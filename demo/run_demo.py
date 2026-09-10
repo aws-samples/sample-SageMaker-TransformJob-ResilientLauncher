@@ -42,7 +42,7 @@ if not MODEL_NAME or not S3_BUCKET:
     sys.exit(1)
 
 # Instance types for the demo
-STANDARD_TYPES = ["ml.g6.12xlarge", "ml.g5.4xlarge"]
+STANDARD_TYPES = ["ml.g6.12xlarge", "ml.g5.4xlarge", "ml.g4dn.xlarge"]
 SDK_TYPES = ["ml.g6.12xlarge", "ml.g5.4xlarge", "ml.g4dn.xlarge"]
 
 STANDARD_NOTES = {
@@ -326,8 +326,8 @@ def run_sdk(
         lg.addHandler(handler)
         lg.setLevel(logging.INFO)
 
+    output_path = f"s3://{S3_BUCKET}/{output_prefix}/"
     try:
-        output_path = f"s3://{S3_BUCKET}/{output_prefix}/"
         result = launch_create_transform_job(
             TransformJobName=f"demo-sdk-{uuid.uuid4().hex[:6]}",
             ModelName=MODEL_NAME,
