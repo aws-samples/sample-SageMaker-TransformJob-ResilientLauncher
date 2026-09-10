@@ -92,19 +92,9 @@ class TypeExpander:
             if meta.gpu_memory_gb >= source.gpu_memory_gb:
                 candidates.append((itype, meta))
 
-        # Filter by non-zero quota
-        all_types = [c[0] for c in candidates]
-        quotas = self._quota_fetcher.fetch_quotas(all_types)
-
-        filtered = []
-        for itype, meta in candidates:
-            quota = quotas.get(itype)
-            if quota is not None and quota > 0:
-                filtered.append((itype, meta))
-
         # Sort by GPU memory ascending (cheapest-fit-first)
-        filtered.sort(key=lambda x: (x[1].gpu_memory_gb, x[0]))
+        candidates.sort(key=lambda x: (x[1].gpu_memory_gb, x[0]))
 
         result = [instance_type]
-        result.extend(itype for itype, _ in filtered)
+        result.extend(itype for itype, _ in candidates)
         return result

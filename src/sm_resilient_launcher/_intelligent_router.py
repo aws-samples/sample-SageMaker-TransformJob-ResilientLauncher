@@ -102,15 +102,6 @@ class IntelligentRouter:
         # Step 2: Fetch deterministic facts for all candidates
         quotas = self._quota_fetcher.fetch_quotas(candidates)
 
-        # Filter out types with quota=0 — they'll definitely fail.
-        # Keep types with quota > 0 or quota=None (unknown, might work).
-        candidates = [t for t in candidates if quotas.get(t) is None or quotas.get(t, 0) > 0]
-        # Always keep the original type
-        if original_instance_type not in candidates:
-            candidates.insert(0, original_instance_type)
-        # Re-fetch quotas for the filtered list (to pass clean data to prompt)
-        quotas = {t: quotas[t] for t in candidates if t in quotas}
-
         # Step 3: Build prompt and call Bedrock
         prompt = self._build_prompt(
             original_instance_type,
@@ -189,15 +180,16 @@ class IntelligentRouter:
             f"Original requested type: {original_type}\n\n"
             f"You know the GPU specifications and approximate pricing "
             f"for each instance type from your training data.\n\n"
-            f"Instance types with non-zero quota available for "
-            f"Batch Transform:\n"
+            f"Instance types available for Batch Transform "
+            f"(quota from Service Quotas API):\n"
             f"{facts_block}\n\n"
             f"Instructions:\n"
             f"1. Reason about GPU memory fit for the workload.\n"
             f"2. Place the original type first.\n"
             f"3. Order remaining types by fit and cost-effectiveness.\n"
-            f"4. Types with unknown quota should still be included — "
-            f"the SDK handles failures at runtime.\n"
+            f"4. Quota values are advisory — the SDK handles quota "
+            f"failures at runtime. Prefer types with higher quota "
+            f"but include all types.\n"
             f"5. Include ALL candidate types in the priority list — "
             f"the SDK handles failures at runtime.\n"
             f"6. Recommend 'sequential' or 'race' strategy.\n\n"
