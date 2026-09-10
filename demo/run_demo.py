@@ -567,15 +567,27 @@ def run_ai_expansion(input_uri: str):
     type_expander = TypeExpander(quota_fetcher)
     router = IntelligentRouter(quota_fetcher, pricing_fetcher, type_expander, REGION)
 
-    candidates = type_expander.expand(scalar_type, REGION)
-    print(f"  TypeExpander candidates: {candidates}")
+    # Discover ALL transform types from the account's Service Quotas
+    all_transform_types = quota_fetcher.get_all_transform_types()
+    # Filter to GPU types (what the IntelligentRouter sends to Bedrock)
+    gpu_prefixes = ("ml.g", "ml.p", "ml.trn", "ml.inf")
+    candidates = [t for t in all_transform_types if any(t.startswith(p) for p in gpu_prefixes)]
+    # Ensure original type is included
+    if scalar_type not in candidates:
+        candidates.insert(0, scalar_type)
+    print(f"  GPU types in account (from Service Quotas API): {len(candidates)} types")
+    for t in candidates:
+        print(f"    {t}")
     print()
 
     # ── Step 2: Fetch quotas and pricing (deterministic) ──
 
     quotas = quota_fetcher.fetch_quotas(candidates)
     prices = pricing_fetcher.fetch_prices(candidates)
-    print(f"  Quotas: {quotas}")
+    print(f"  Quotas (non-zero):")
+    for t, q in sorted(quotas.items()):
+        if q and q > 0:
+            print(f"    {t}: {q}")
     print(f"  Prices: {prices}")
     print()
 
