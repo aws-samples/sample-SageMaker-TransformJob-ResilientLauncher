@@ -101,7 +101,15 @@ class IntelligentRouter:
 
         # Step 2: Fetch deterministic facts for all candidates
         quotas = self._quota_fetcher.fetch_quotas(candidates)
-        prices = self._pricing_fetcher.fetch_prices(candidates)
+
+        # Filter out types with quota=0 — they'll definitely fail.
+        # Keep types with quota > 0 or quota=None (unknown, might work).
+        candidates = [t for t in candidates if quotas.get(t) is None or quotas.get(t, 0) > 0]
+        # Always keep the original type
+        if original_instance_type not in candidates:
+            candidates.insert(0, original_instance_type)
+        # Re-fetch quotas for the filtered list (to pass clean data to prompt)
+        quotas = {t: quotas[t] for t in candidates if t in quotas}
 
         # Step 3: Build prompt and call Bedrock
         prompt = self._build_prompt(
@@ -109,7 +117,6 @@ class IntelligentRouter:
             candidates,
             workload_description,
             quotas,
-            prices,
         )
 
         try:
@@ -151,23 +158,19 @@ class IntelligentRouter:
         candidates: list[str],
         workload_description: str,
         quotas: dict[str, int | None],
-        prices: dict[str, float | None],
     ) -> str:
         """Construct the Bedrock prompt with deterministic facts.
 
         The prompt includes the workload description, original type,
-        GPU memory reference data, quota values, and pricing — all
-        fetched deterministically.  Bedrock is never used to look up
-        quotas or pricing.
+        GPU memory reference data, and quota values — all fetched
+        deterministically.  Bedrock is never used to look up quotas.
+        Pricing is omitted; Bedrock knows approximate pricing from
+        its training data.
         """
         gpu_catalog = TypeExpander.GPU_CATALOG
         facts_lines = []
         for itype in candidates:
             quota_val = quotas.get(itype, "unknown")
-            price_val = prices.get(itype)
-            price_str = (
-                f"${price_val:.3f}/hr" if price_val else "unknown"
-            )
             meta = gpu_catalog.get(itype)
             gpu_str = (
                 f"{meta.gpu_name} {meta.gpu_memory_gb}GB x{meta.gpu_count}"
@@ -175,8 +178,7 @@ class IntelligentRouter:
                 else ""  # Bedrock knows the GPU specs from its training data
             )
             facts_lines.append(
-                f"  - {itype}: {gpu_str}, quota={quota_val}, "
-                f"price={price_str}"
+                f"  - {itype}: {gpu_str}, quota={quota_val}"
             )
         facts_block = "\n".join(facts_lines)
 
@@ -185,19 +187,16 @@ class IntelligentRouter:
             f"Batch Transform jobs.\n\n"
             f"Workload description: {workload_description}\n\n"
             f"Original requested type: {original_type}\n\n"
-            f"You know the GPU specifications for each instance type "
-            f"from your training data.\n\n"
-            f"Instance types available for Batch Transform "
-            f"(with quota and pricing facts — "
-            f"deterministically fetched — do NOT look these up):\n"
+            f"You know the GPU specifications and approximate pricing "
+            f"for each instance type from your training data.\n\n"
+            f"Instance types with non-zero quota available for "
+            f"Batch Transform:\n"
             f"{facts_block}\n\n"
             f"Instructions:\n"
             f"1. Reason about GPU memory fit for the workload.\n"
             f"2. Place the original type first.\n"
             f"3. Order remaining types by fit and cost-effectiveness.\n"
-            f"4. Prefer types with non-zero quota when known. "
-            f"Types with quota=0 are likely unavailable.\n"
-            f"   Types with unknown quota should still be included — "
+            f"4. Types with unknown quota should still be included — "
             f"the SDK handles failures at runtime.\n"
             f"5. Include ALL candidate types in the priority list — "
             f"the SDK handles failures at runtime.\n"

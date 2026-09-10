@@ -4,9 +4,9 @@ Property 6: IntelligentRouter prompt contains all deterministic facts
     For any workload description and set of candidate instance types, the
     Bedrock prompt constructed by _build_prompt() SHALL contain: the workload
     description text, the original instance type, GPU memory reference data
-    for each candidate, the deterministically-fetched quota value for each
-    candidate, and the deterministically-fetched price for each candidate.
-    Bedrock is never used to look up quotas or pricing.
+    for each candidate, and the deterministically-fetched quota value for each
+    candidate.  Pricing is omitted from the prompt — Bedrock knows approximate
+    pricing from its training data.
 
 Property 7: Bedrock failure falls back to TypeExpander
     For any Bedrock Converse API call failure during AI Expansion, the
@@ -180,19 +180,6 @@ class TestGeneratePlanHappyPath:
             ["ml.g5.4xlarge", "ml.g5.12xlarge", "ml.p4d.24xlarge"]
         )
 
-    def test_fetches_prices_for_discovered_candidates(
-        self, router, mock_pricing_fetcher
-    ):
-        router._bedrock.converse.return_value = _make_bedrock_response(
-            ["ml.g5.4xlarge"]
-        )
-
-        router.generate_plan("ml.g5.4xlarge", "batch job")
-
-        mock_pricing_fetcher.fetch_prices.assert_called_once_with(
-            ["ml.g5.4xlarge", "ml.g5.12xlarge", "ml.p4d.24xlarge"]
-        )
-
     def test_race_strategy_returned(self, router):
         router._bedrock.converse.return_value = _make_bedrock_response(
             ["ml.g5.4xlarge", "ml.g5.12xlarge"],
@@ -342,7 +329,8 @@ class TestBedrockFallback:
 
 class TestBuildPrompt:
     """_build_prompt includes workload description, original type,
-    GPU metadata, quota values, and pricing for every candidate."""
+    GPU metadata, and quota values for every candidate.  Pricing is
+    omitted — Bedrock knows approximate pricing from its training data."""
 
     def test_prompt_contains_workload_description(self, router):
         prompt = router._build_prompt(
@@ -350,7 +338,6 @@ class TestBuildPrompt:
             ["ml.g5.4xlarge"],
             "ResNet-50 inference, fp32, ~200MB GPU memory",
             {"ml.g5.4xlarge": 4},
-            {"ml.g5.4xlarge": 2.03},
         )
 
         assert "ResNet-50 inference, fp32, ~200MB GPU memory" in prompt
@@ -361,7 +348,6 @@ class TestBuildPrompt:
             ["ml.g5.4xlarge"],
             "batch inference",
             {"ml.g5.4xlarge": 4},
-            {"ml.g5.4xlarge": 2.03},
         )
 
         assert "ml.g5.4xlarge" in prompt
@@ -373,7 +359,6 @@ class TestBuildPrompt:
             ["ml.g5.4xlarge", "ml.p4d.24xlarge"],
             "batch job",
             {"ml.g5.4xlarge": 4, "ml.p4d.24xlarge": 1},
-            {"ml.g5.4xlarge": 2.03, "ml.p4d.24xlarge": 37.688},
         )
 
         assert "A10G 24GB x1" in prompt
@@ -385,23 +370,21 @@ class TestBuildPrompt:
             ["ml.g5.4xlarge", "ml.p4d.24xlarge"],
             "batch job",
             {"ml.g5.4xlarge": 4, "ml.p4d.24xlarge": 1},
-            {"ml.g5.4xlarge": 2.03, "ml.p4d.24xlarge": 37.688},
         )
 
         assert "quota=4" in prompt
         assert "quota=1" in prompt
 
-    def test_prompt_contains_pricing(self, router):
+    def test_prompt_does_not_contain_pricing(self, router):
         prompt = router._build_prompt(
             "ml.g5.4xlarge",
-            ["ml.g5.4xlarge", "ml.p4d.24xlarge"],
+            ["ml.g5.4xlarge"],
             "batch job",
-            {"ml.g5.4xlarge": 4, "ml.p4d.24xlarge": 1},
-            {"ml.g5.4xlarge": 2.03, "ml.p4d.24xlarge": 37.688},
+            {"ml.g5.4xlarge": 4},
         )
 
-        assert "$2.030/hr" in prompt
-        assert "$37.688/hr" in prompt
+        assert "price=" not in prompt
+        assert "$/hr" not in prompt
 
     def test_prompt_handles_none_quota(self, router):
         prompt = router._build_prompt(
@@ -409,21 +392,9 @@ class TestBuildPrompt:
             ["ml.g5.4xlarge"],
             "batch job",
             {"ml.g5.4xlarge": None},
-            {"ml.g5.4xlarge": 2.03},
         )
 
         assert "quota=None" in prompt
-
-    def test_prompt_handles_none_pricing(self, router):
-        prompt = router._build_prompt(
-            "ml.g5.4xlarge",
-            ["ml.g5.4xlarge"],
-            "batch job",
-            {"ml.g5.4xlarge": 4},
-            {"ml.g5.4xlarge": None},
-        )
-
-        assert "price=unknown" in prompt
 
     def test_prompt_handles_unknown_instance_type(self, router):
         """Instance type not in GPU_CATALOG gets empty GPU string —
@@ -433,7 +404,6 @@ class TestBuildPrompt:
             ["ml.x99.mega"],
             "batch job",
             {"ml.x99.mega": 2},
-            {"ml.x99.mega": 10.0},
         )
 
         assert "ml.x99.mega" in prompt
