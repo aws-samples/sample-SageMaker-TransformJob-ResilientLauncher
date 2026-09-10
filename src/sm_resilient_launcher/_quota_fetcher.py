@@ -15,9 +15,13 @@ logger = logging.getLogger(__name__)
 class QuotaFetcher:
     """Fetches SageMaker Batch Transform service quotas deterministically.
 
-    Uses the ``service_quotas`` client's ``get_service_quota()`` API.
-    Quota codes are resolved once per instance type via
-    ``list_service_quotas`` and cached for subsequent lookups.
+    Uses a single-pass approach: on first call, paginates ALL SageMaker
+    quotas via ``list_service_quotas``, filters for transform-related
+    entries, and caches every quota code and value.  Subsequent lookups
+    are instant from the cache.
+
+    This avoids the bug where per-type pagination missed types whose
+    quota entries appeared on different pages.
     """
 
     SERVICE_CODE = "sagemaker"
@@ -26,6 +30,8 @@ class QuotaFetcher:
         self._client = boto3.client("service-quotas", region_name=region)
         self._region = region
         self._quota_code_cache: dict[str, str | None] = {}
+        self._quota_value_cache: dict[str, int] = {}
+        self._cache_loaded: bool = False
 
     def fetch_quotas(
         self, instance_types: list[str]
@@ -43,64 +49,57 @@ class QuotaFetcher:
             A dict mapping each instance type to its integer quota
             value, or ``None`` when the quota is unavailable.
         """
+        self._ensure_cache_loaded()
         results: dict[str, int | None] = {}
         for itype in instance_types:
-            quota_code = self._resolve_quota_code(itype)
-            if quota_code is None:
-                results[itype] = None
-                continue
-            try:
-                resp = self._client.get_service_quota(
-                    ServiceCode=self.SERVICE_CODE,
-                    QuotaCode=quota_code,
-                )
-                results[itype] = int(resp["Quota"]["Value"])
-            except Exception as exc:
-                logger.debug(
-                    "Quota fetch failed for %s in %s: %s",
-                    itype,
-                    self._region,
-                    exc,
-                )
+            if itype in self._quota_value_cache:
+                results[itype] = self._quota_value_cache[itype]
+            elif itype in self._quota_code_cache:
+                # Have code but no cached value — fetch it
+                try:
+                    resp = self._client.get_service_quota(
+                        ServiceCode=self.SERVICE_CODE,
+                        QuotaCode=self._quota_code_cache[itype],
+                    )
+                    results[itype] = int(resp["Quota"]["Value"])
+                except Exception:
+                    results[itype] = None
+            else:
                 results[itype] = None
         return results
 
-    def _resolve_quota_code(self, instance_type: str) -> str | None:
-        """Look up the quota code for a Batch Transform instance type.
+    def _ensure_cache_loaded(self) -> None:
+        """Load all SageMaker transform quotas into cache in one pass.
 
-        Uses ``list_service_quotas`` with keyword filter.  Results are
-        cached so each instance type is resolved at most once.
-
-        Args:
-            instance_type: A SageMaker instance type string
-                (e.g. ``"ml.g5.4xlarge"``).
-
-        Returns:
-            The quota code string, or ``None`` if it cannot be found.
+        Paginates ``list_service_quotas`` once, filters for quotas
+        containing ``'transform'`` in the name, and builds a mapping
+        from instance type to quota code + value.
         """
-        if instance_type in self._quota_code_cache:
-            return self._quota_code_cache[instance_type]
+        if self._cache_loaded:
+            return
 
         try:
-            # Extract family.size (e.g., "g5.4xlarge" from "ml.g5.4xlarge")
-            short_name = instance_type.replace("ml.", "")
             paginator = self._client.get_paginator("list_service_quotas")
             for page in paginator.paginate(ServiceCode=self.SERVICE_CODE):
                 for quota in page["Quotas"]:
                     name_lower = quota["QuotaName"].lower()
-                    if (
-                        short_name.lower() in name_lower
-                        and "transform" in name_lower
-                    ):
-                        code = quota["QuotaCode"]
-                        self._quota_code_cache[instance_type] = code
-                        return code
+                    if "transform" not in name_lower:
+                        continue
+                    # Extract the instance type pattern from the quota name
+                    # Pattern: "ml.g4dn.xlarge for transform job usage"
+                    # We match against the part before " for "
+                    parts = name_lower.split(" for ")
+                    if parts:
+                        instance_pattern = parts[0].strip()
+                        # Remove "ml." prefix for matching
+                        short = instance_pattern.replace("ml.", "")
+                        self._quota_code_cache[f"ml.{short}"] = quota[
+                            "QuotaCode"
+                        ]
+                        self._quota_value_cache[f"ml.{short}"] = int(
+                            quota["Value"]
+                        )
         except Exception as exc:
-            logger.debug(
-                "Quota code lookup failed for %s: %s",
-                instance_type,
-                exc,
-            )
+            logger.debug("Failed to load quota cache: %s", exc)
 
-        self._quota_code_cache[instance_type] = None
-        return None
+        self._cache_loaded = True
