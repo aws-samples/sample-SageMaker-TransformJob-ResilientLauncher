@@ -283,22 +283,14 @@ def run_sdk(
     result_store: dict,
     standard_done: threading.Event | None = None,
 ):
-    """RIGHT SIDE: SDK with race mode — all types launched in parallel.
-
-    Runs the SDK call in a sub-thread while the main thread polls
-    ``list_transform_jobs`` every 15 seconds so the audience sees live
-    status updates for each race job as it progresses.
-    """
+    """RIGHT SIDE: SDK with race mode — with live log capture."""
     from sm_resilient_launcher import launch_create_transform_job, AllTypesExhaustedError
+    import logging
 
-    # Wait for the standard side to finish before starting
     if standard_done is not None:
         standard_done.wait()
 
     start = time.time()
-    job_prefix = f"demo-sdk-{uuid.uuid4().hex[:6]}"
-    sdk_done = threading.Event()
-    sdk_result: dict = {}  # populated by the SDK sub-thread
 
     with lock:
         events.append(("right", f"[  0s] Racing {len(SDK_TYPES)} types in parallel..."))
@@ -306,83 +298,57 @@ def run_sdk(
             note = SDK_NOTES.get(itype, "")
             events.append(("right", f"       \u2192 {itype} ({note})"))
 
-    # ── SDK sub-thread ─────────────────────────────────────────
+    # Set up a log handler that captures SDK log messages
+    class DemoLogHandler(logging.Handler):
+        def emit(self, record):
+            elapsed = int(time.time() - start)
+            msg = record.getMessage()
+            # Filter for interesting messages
+            if any(kw in msg.lower() for kw in [
+                "failed", "cancel", "winner", "skipping", "moving",
+                "exhausted", "capacity", "quota",
+            ]):
+                short_msg = msg[:38]
+                with lock:
+                    events.append(("right", f"[{elapsed:>3}s] {short_msg}"))
 
-    def _run_sdk_internal():
-        """Execute the SDK call; store result or error, then signal done."""
-        try:
-            output_path = f"s3://{S3_BUCKET}/{output_prefix}/"
-            result = launch_create_transform_job(
-                TransformJobName=job_prefix,
-                ModelName=MODEL_NAME,
-                TransformInput={
-                    "DataSource": {
-                        "S3DataSource": {
-                            "S3DataType": "S3Prefix",
-                            "S3Uri": input_uri,
-                        }
-                    },
-                    "ContentType": "text/csv",
-                    "SplitType": "Line",
+    handler = DemoLogHandler()
+    handler.setLevel(logging.INFO)
+
+    # Attach to SDK loggers
+    sdk_loggers = [
+        logging.getLogger("sm_resilient_launcher._race_engine"),
+        logging.getLogger("sm_resilient_launcher._sequential_engine"),
+        logging.getLogger("sm_resilient_launcher._error_classifier"),
+    ]
+    for lg in sdk_loggers:
+        lg.addHandler(handler)
+        lg.setLevel(logging.INFO)
+
+    try:
+        output_path = f"s3://{S3_BUCKET}/{output_prefix}/"
+        result = launch_create_transform_job(
+            TransformJobName=f"demo-sdk-{uuid.uuid4().hex[:6]}",
+            ModelName=MODEL_NAME,
+            TransformInput={
+                "DataSource": {
+                    "S3DataSource": {
+                        "S3DataType": "S3Prefix",
+                        "S3Uri": input_uri,
+                    }
                 },
-                TransformOutput={"S3OutputPath": output_path},
-                TransformResources={
-                    "InstanceType": SDK_TYPES,
-                    "InstanceCount": 1,
-                },
-                Strategy="race",
-            )
-            sdk_result["result"] = result
-            sdk_result["output_path"] = output_path
-        except Exception as e:
-            sdk_result["error"] = e
-        finally:
-            sdk_done.set()
-
-    sdk_thread = threading.Thread(target=_run_sdk_internal, daemon=True)
-    sdk_thread.start()
-
-    # ── Background poller (runs in the caller thread) ──────────
-
-    sm = boto3.client("sagemaker", region_name=REGION)
-    seen_statuses: dict[str, str] = {}  # job_name -> last reported status
-
-    while not sdk_done.is_set():
-        sdk_done.wait(timeout=15)
-        if sdk_done.is_set():
-            break
+                "ContentType": "text/csv",
+                "SplitType": "Line",
+            },
+            TransformOutput={"S3OutputPath": output_path},
+            TransformResources={
+                "InstanceType": SDK_TYPES,
+                "InstanceCount": 1,
+            },
+            Strategy="race",
+        )
 
         elapsed = int(time.time() - start)
-
-        try:
-            resp = sm.list_transform_jobs(
-                NameContains=job_prefix[:20],
-                SortBy="CreationTime",
-                SortOrder="Descending",
-                MaxResults=10,
-            )
-            for job in resp.get("TransformJobSummaries", []):
-                name = job["TransformJobName"]
-                status = job["TransformJobStatus"]
-                # Only emit an event when the status changes (or first sight)
-                if seen_statuses.get(name) != status:
-                    seen_statuses[name] = status
-                    short_name = name[len(job_prefix) + 1 :] if name.startswith(job_prefix) else name
-                    with lock:
-                        events.append(("right", f"[{elapsed:>3}s] {short_name}: {status}"))
-        except Exception:
-            with lock:
-                events.append(("right", f"[{elapsed:>3}s] \u23f3 Working..."))
-
-    sdk_thread.join()
-
-    # ── Process SDK result ─────────────────────────────────────
-
-    elapsed = int(time.time() - start)
-
-    if "result" in sdk_result:
-        result = sdk_result["result"]
-        output_path = sdk_result["output_path"]
         with lock:
             events.append(("right", f"[{elapsed:>3}s] \u2705 Winner: {result.instance_type_used}"))
             events.append(("right", f"[{elapsed:>3}s]    Job: {result.job_name[:35]}"))
@@ -402,30 +368,36 @@ def run_sdk(
             "errors": [f"{e.instance_type}: {e.category.value}" for e in result.errors],
         }
 
-    elif "error" in sdk_result:
-        err = sdk_result["error"]
-        if isinstance(err, AllTypesExhaustedError):
-            with lock:
-                events.append(("right", f"[{elapsed:>3}s] \u274c All types exhausted"))
-                events.append(("right_result", f"FAILED | {elapsed}s | {len(err.errors)} errors"))
-            result_store["right"] = {
-                "winner": None,
-                "elapsed": elapsed,
-                "attempts": len(err.errors),
-                "output_path": None,
-                "manual_interventions": 0,
-            }
-        else:
-            with lock:
-                events.append(("right", f"[{elapsed:>3}s] \u274c Error: {str(err)[:40]}"))
-                events.append(("right_result", f"ERROR | {elapsed}s"))
-            result_store["right"] = {
-                "winner": None,
-                "elapsed": elapsed,
-                "attempts": 0,
-                "output_path": None,
-                "manual_interventions": 0,
-            }
+    except AllTypesExhaustedError as e:
+        elapsed = int(time.time() - start)
+        with lock:
+            events.append(("right", f"[{elapsed:>3}s] \u274c All types exhausted"))
+            events.append(("right_result", f"FAILED | {elapsed}s | {len(e.errors)} errors"))
+        result_store["right"] = {
+            "winner": None,
+            "elapsed": elapsed,
+            "attempts": len(e.errors),
+            "output_path": None,
+            "manual_interventions": 0,
+        }
+
+    except Exception as e:
+        elapsed = int(time.time() - start)
+        with lock:
+            events.append(("right", f"[{elapsed:>3}s] \u274c Error: {str(e)[:40]}"))
+            events.append(("right_result", f"ERROR | {elapsed}s"))
+        result_store["right"] = {
+            "winner": None,
+            "elapsed": elapsed,
+            "attempts": 0,
+            "output_path": None,
+            "manual_interventions": 0,
+        }
+
+    finally:
+        # Remove the handler to avoid side effects
+        for lg in sdk_loggers:
+            lg.removeHandler(handler)
 
 
 # ── Phase 1: Output comparison ────────────────────────────────
