@@ -84,10 +84,20 @@ class IntelligentRouter:
         if excluded_types is None:
             excluded_types = set()
 
-        # Step 1: Get all candidates from TypeExpander (for the candidate list)
-        candidates = self._type_expander.expand(
-            original_instance_type, self._region, excluded_types
-        )
+        # Step 1: Discover ALL GPU types dynamically from the quota API
+        all_types = self._quota_fetcher.get_all_transform_types()
+        gpu_prefixes = ("ml.g", "ml.p", "ml.trn", "ml.inf")
+        gpu_types = [t for t in all_types if any(t.startswith(p) for p in gpu_prefixes)]
+
+        # Exclude types in the excluded set
+        if excluded_types:
+            gpu_types = [t for t in gpu_types if t not in excluded_types]
+
+        # Ensure original type is in the list (might not be if not a GPU type)
+        if original_instance_type not in gpu_types:
+            gpu_types.insert(0, original_instance_type)
+
+        candidates = gpu_types
 
         # Step 2: Fetch deterministic facts for all candidates
         quotas = self._quota_fetcher.fetch_quotas(candidates)
@@ -162,7 +172,7 @@ class IntelligentRouter:
             gpu_str = (
                 f"{meta.gpu_name} {meta.gpu_memory_gb}GB x{meta.gpu_count}"
                 if meta
-                else "unknown GPU"
+                else ""  # Bedrock knows the GPU specs from its training data
             )
             facts_lines.append(
                 f"  - {itype}: {gpu_str}, quota={quota_val}, "
@@ -175,15 +185,23 @@ class IntelligentRouter:
             f"Batch Transform jobs.\n\n"
             f"Workload description: {workload_description}\n\n"
             f"Original requested type: {original_type}\n\n"
-            f"GPU memory reference and current facts "
-            f"(deterministically fetched — do NOT look these up):\n"
+            f"You know the GPU specifications for each instance type "
+            f"from your training data.\n\n"
+            f"Instance types available for Batch Transform "
+            f"(with quota and pricing facts — "
+            f"deterministically fetched — do NOT look these up):\n"
             f"{facts_block}\n\n"
             f"Instructions:\n"
             f"1. Reason about GPU memory fit for the workload.\n"
-            f"2. Exclude types with quota=0 or quota=None.\n"
-            f"3. Place the original type first.\n"
-            f"4. Order remaining types by fit and cost-effectiveness.\n"
-            f"5. Recommend 'sequential' or 'race' strategy.\n\n"
+            f"2. Place the original type first.\n"
+            f"3. Order remaining types by fit and cost-effectiveness.\n"
+            f"4. Prefer types with non-zero quota when known. "
+            f"Types with quota=0 are likely unavailable.\n"
+            f"   Types with unknown quota should still be included — "
+            f"the SDK handles failures at runtime.\n"
+            f"5. Include ALL candidate types in the priority list — "
+            f"the SDK handles failures at runtime.\n"
+            f"6. Recommend 'sequential' or 'race' strategy.\n\n"
             f"Respond in JSON:\n"
             f'{{"priority_list": ["type1", "type2"], '
             f'"strategy": "sequential"|"race", '

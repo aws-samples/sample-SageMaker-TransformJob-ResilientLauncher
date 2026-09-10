@@ -83,6 +83,12 @@ def mock_quota_fetcher():
         "ml.g5.12xlarge": 2,
         "ml.p4d.24xlarge": 1,
     }
+    # Dynamic discovery: return GPU types from the quota API
+    fetcher.get_all_transform_types.return_value = [
+        "ml.g5.4xlarge",
+        "ml.g5.12xlarge",
+        "ml.p4d.24xlarge",
+    ]
     return fetcher
 
 
@@ -149,8 +155,8 @@ class TestGeneratePlanHappyPath:
         assert strategy == "sequential"
         assert reasoning == "A10G fits, A100 as fallback"
 
-    def test_calls_type_expander_for_candidates(
-        self, router, mock_type_expander
+    def test_discovers_types_dynamically_from_quota_api(
+        self, router, mock_quota_fetcher
     ):
         router._bedrock.converse.return_value = _make_bedrock_response(
             ["ml.g5.4xlarge"]
@@ -158,11 +164,9 @@ class TestGeneratePlanHappyPath:
 
         router.generate_plan("ml.g5.4xlarge", "batch job")
 
-        mock_type_expander.expand.assert_called_once_with(
-            "ml.g5.4xlarge", "us-east-1", set()
-        )
+        mock_quota_fetcher.get_all_transform_types.assert_called_once()
 
-    def test_fetches_quotas_for_candidates(
+    def test_fetches_quotas_for_discovered_candidates(
         self, router, mock_quota_fetcher, mock_type_expander
     ):
         router._bedrock.converse.return_value = _make_bedrock_response(
@@ -171,11 +175,12 @@ class TestGeneratePlanHappyPath:
 
         router.generate_plan("ml.g5.4xlarge", "batch job")
 
+        # Candidates come from get_all_transform_types, filtered to GPU types
         mock_quota_fetcher.fetch_quotas.assert_called_once_with(
             ["ml.g5.4xlarge", "ml.g5.12xlarge", "ml.p4d.24xlarge"]
         )
 
-    def test_fetches_prices_for_candidates(
+    def test_fetches_prices_for_discovered_candidates(
         self, router, mock_pricing_fetcher
     ):
         router._bedrock.converse.return_value = _make_bedrock_response(
@@ -201,9 +206,16 @@ class TestGeneratePlanHappyPath:
 
         assert strategy == "race"
 
-    def test_excluded_types_forwarded_to_expander(
-        self, router, mock_type_expander
+    def test_excluded_types_filtered_from_dynamic_candidates(
+        self, router, mock_quota_fetcher
     ):
+        # Include ml.p4d.24xlarge so it can be excluded
+        mock_quota_fetcher.get_all_transform_types.return_value = [
+            "ml.g5.4xlarge",
+            "ml.g5.12xlarge",
+            "ml.p3.2xlarge",
+            "ml.p4d.24xlarge",
+        ]
         router._bedrock.converse.return_value = _make_bedrock_response(
             ["ml.g5.4xlarge"]
         )
@@ -214,9 +226,11 @@ class TestGeneratePlanHappyPath:
             excluded_types={"ml.p3.2xlarge"},
         )
 
-        mock_type_expander.expand.assert_called_once_with(
-            "ml.g5.4xlarge", "us-east-1", {"ml.p3.2xlarge"}
-        )
+        # The excluded type should not appear in the candidates
+        # passed to fetch_quotas
+        called_candidates = mock_quota_fetcher.fetch_quotas.call_args[0][0]
+        assert "ml.p3.2xlarge" not in called_candidates
+        assert "ml.g5.4xlarge" in called_candidates
 
 
 # ---------------------------------------------------------------------------
@@ -292,16 +306,15 @@ class TestBedrockFallback:
         assert strategy == "sequential"
         assert reasoning is None
 
-    def test_fallback_calls_type_expander_again(
+    def test_fallback_calls_type_expander(
         self, router, mock_type_expander
     ):
         router._bedrock.converse.side_effect = RuntimeError("fail")
 
         router.generate_plan("ml.g5.4xlarge", "batch job")
 
-        # TypeExpander.expand called twice: once for candidates, once
-        # for fallback
-        assert mock_type_expander.expand.call_count == 2
+        # TypeExpander.expand called once: only for fallback
+        assert mock_type_expander.expand.call_count == 1
 
     def test_fallback_passes_excluded_types(
         self, router, mock_type_expander
@@ -315,7 +328,7 @@ class TestBedrockFallback:
         )
 
         # The fallback call should include excluded_types
-        fallback_call = mock_type_expander.expand.call_args_list[1]
+        fallback_call = mock_type_expander.expand.call_args_list[0]
         assert fallback_call.args == (
             "ml.g5.4xlarge",
             "us-east-1",
@@ -413,7 +426,8 @@ class TestBuildPrompt:
         assert "price=unknown" in prompt
 
     def test_prompt_handles_unknown_instance_type(self, router):
-        """Instance type not in GPU_CATALOG gets 'unknown GPU'."""
+        """Instance type not in GPU_CATALOG gets empty GPU string —
+        Bedrock knows GPU specs from its training data."""
         prompt = router._build_prompt(
             "ml.x99.mega",
             ["ml.x99.mega"],
@@ -422,7 +436,9 @@ class TestBuildPrompt:
             {"ml.x99.mega": 10.0},
         )
 
-        assert "unknown GPU" in prompt
+        assert "ml.x99.mega" in prompt
+        # Should NOT have "unknown GPU" — empty string for unknown types
+        assert "unknown GPU" not in prompt
 
 
 # ---------------------------------------------------------------------------

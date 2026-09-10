@@ -33,6 +33,15 @@ class QuotaFetcher:
         self._quota_value_cache: dict[str, int] = {}
         self._cache_loaded: bool = False
 
+    def get_all_transform_types(self) -> list[str]:
+        """Return all Batch Transform instance types found in the quota API.
+
+        Loads the cache first if needed, then returns all instance type
+        names that have a transform quota entry.
+        """
+        self._ensure_cache_loaded()
+        return sorted(self._quota_value_cache.keys())
+
     def fetch_quotas(
         self, instance_types: list[str]
     ) -> dict[str, int | None]:
