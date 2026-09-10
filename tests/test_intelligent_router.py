@@ -511,7 +511,7 @@ class TestBedrockCallConstruction:
         router.generate_plan("ml.g5.4xlarge", "batch job")
 
         call_kwargs = router._bedrock.converse.call_args.kwargs
-        assert call_kwargs["modelId"] == "anthropic.claude-sonnet-4-20250514"
+        assert call_kwargs["modelId"] == "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
 
     def test_bedrock_receives_user_message(self, router):
         router._bedrock.converse.return_value = _make_bedrock_response(

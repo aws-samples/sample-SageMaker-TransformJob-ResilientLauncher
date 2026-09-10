@@ -33,7 +33,7 @@ class IntelligentRouter:
     Falls back to ``TypeExpander`` if Bedrock fails.
     """
 
-    MODEL_ID: str = "anthropic.claude-sonnet-4-20250514"
+    MODEL_ID: str = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
 
     def __init__(
         self,
