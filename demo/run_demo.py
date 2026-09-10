@@ -592,7 +592,19 @@ def run_ai_expansion(input_uri: str):
 
     # ── Step 3: Build and show the prompt ──
 
-    prompt = router._build_prompt(scalar_type, candidates, workload_desc, quotas)
+    # Filter to quota > 0 (matching what generate_plan sends to Bedrock)
+    prompt_candidates = [
+        t for t in candidates
+        if quotas.get(t) is None or quotas.get(t, 0) > 0
+    ]
+    if scalar_type not in prompt_candidates:
+        prompt_candidates.insert(0, scalar_type)
+    prompt_quotas = {t: quotas.get(t) for t in prompt_candidates}
+
+    print(f"  After filtering quota=0: {len(prompt_candidates)} types sent to Bedrock")
+    print()
+
+    prompt = router._build_prompt(scalar_type, prompt_candidates, workload_desc, prompt_quotas)
     print("  Prompt sent to Bedrock:")
     print("  " + "\u2500" * 60)
     for line in prompt.split("\n"):
