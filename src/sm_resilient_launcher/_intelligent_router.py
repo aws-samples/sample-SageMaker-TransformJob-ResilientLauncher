@@ -102,12 +102,25 @@ class IntelligentRouter:
         # Step 2: Fetch deterministic facts for all candidates
         quotas = self._quota_fetcher.fetch_quotas(candidates)
 
+        # For the Bedrock prompt, exclude types with quota=0 (definitely unavailable).
+        # Types with quota=None (lookup failed) are included — might still work.
+        # This is intelligent pre-selection for AI — different from runtime where
+        # the customer's list is always fully respected.
+        prompt_candidates = [
+            t for t in candidates
+            if quotas.get(t) is None or quotas.get(t, 0) > 0
+        ]
+        # Always keep the original type in the prompt
+        if original_instance_type not in prompt_candidates:
+            prompt_candidates.insert(0, original_instance_type)
+        prompt_quotas = {t: quotas.get(t) for t in prompt_candidates}
+
         # Step 3: Build prompt and call Bedrock
         prompt = self._build_prompt(
             original_instance_type,
-            candidates,
+            prompt_candidates,
             workload_description,
-            quotas,
+            prompt_quotas,
         )
 
         try:
@@ -181,7 +194,7 @@ class IntelligentRouter:
             f"You know the GPU specifications and approximate pricing "
             f"for each instance type from your training data.\n\n"
             f"Instance types available for Batch Transform "
-            f"(quota from Service Quotas API):\n"
+            f"(quota > 0 from Service Quotas API):\n"
             f"{facts_block}\n\n"
             f"Instructions:\n"
             f"1. Reason about GPU memory fit for the workload.\n"
