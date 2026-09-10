@@ -24,15 +24,42 @@ Migration from native boto3 requires changing a single import.
 
 ## Installation
 
-```bash
-# From the repository root:
-cd sm-resilient-launcher
+### From GitLab (recommended)
 
-# Install for development
+```bash
+# Clone the repository
+git clone git@ssh.gitlab.aws.dev:supcasa/Sagemaker_Batch_Resilient_Launcher.git
+cd Sagemaker_Batch_Resilient_Launcher
+
+# Install the package
 pip install -e .
 
 # Install with dev dependencies (pytest, hypothesis)
 pip install -e ".[dev]"
+```
+
+### As a dependency in another project
+
+Add to your `requirements.txt`:
+
+```
+sm-resilient-launcher @ git+ssh://git@ssh.gitlab.aws.dev/supcasa/Sagemaker_Batch_Resilient_Launcher.git
+```
+
+Or in `pyproject.toml`:
+
+```toml
+[project]
+dependencies = [
+    "sm-resilient-launcher @ git+ssh://git@ssh.gitlab.aws.dev/supcasa/Sagemaker_Batch_Resilient_Launcher.git",
+]
+```
+
+### As a git submodule (for monorepos)
+
+```bash
+git submodule add git@ssh.gitlab.aws.dev:supcasa/Sagemaker_Batch_Resilient_Launcher.git libs/sm-resilient-launcher
+pip install -e libs/sm-resilient-launcher
 ```
 
 **Requirements:** Python >= 3.10, `boto3`, `botocore`
