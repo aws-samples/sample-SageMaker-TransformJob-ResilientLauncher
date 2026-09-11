@@ -29,6 +29,17 @@ Four strategies control how the SDK handles your job — set via the `Strategy` 
 
 Migration from native boto3 requires changing a single import. With no SDK parameters, behavior is identical to boto3.
 
+### How retries interact with strategies
+
+| Scenario | What happens |
+|---|---|
+| Single type + `MaxRetries` only (no Strategy) | **Sequential with retries** on that one type. Not passthrough — the SDK retries the same type with backoff. |
+| `Strategy="sequential"` + `MaxRetries` | Each type in the list is retried individually before moving to the next. |
+| `Strategy="race"` + `MaxRetries` | All types raced. If entire round fails with capacity errors, wait and race again. |
+| `Strategy="intelligent"` + `MaxRetries` | AI generates the type list, then executes with sequential or race (AI's choice), retries apply. |
+| `Strategy="passthrough"` + `MaxRetries` | **MaxRetries is ignored.** Passthrough = raw boto3, no SDK logic. |
+| No SDK params at all | **Passthrough.** No retries, no SDK logic. |
+
 ### Common Usage Patterns
 
 ```python
@@ -646,17 +657,6 @@ Every SageMaker API error is classified into exactly one of four categories usin
 ## Retry with Exponential Backoff
 
 SageMaker Batch Transform hard-fails in ~40 seconds when capacity is unavailable. Unlike SageMaker Pipelines (which has built-in retry policies), standalone `create_transform_job` calls have no retry mechanism. This SDK fills that gap.
-
-### How retries interact with strategies
-
-| Scenario | What happens |
-|---|---|
-| Single type + `MaxRetries` only (no Strategy) | **Sequential with retries** on that one type. Not passthrough — the SDK retries the same type with backoff. |
-| `Strategy="sequential"` + `MaxRetries` | Each type in the list is retried individually before moving to the next. |
-| `Strategy="race"` + `MaxRetries` | All types raced. If entire round fails with capacity errors, wait and race again. |
-| `Strategy="intelligent"` + `MaxRetries` | AI generates the type list, then executes with sequential or race (AI's choice), retries apply. |
-| `Strategy="passthrough"` + `MaxRetries` | **MaxRetries is ignored.** Passthrough = raw boto3, no SDK logic. |
-| No SDK params at all | **Passthrough.** No retries, no SDK logic. |
 
 ### How it works
 
