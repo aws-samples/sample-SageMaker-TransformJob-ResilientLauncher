@@ -37,6 +37,91 @@ Notes:
 - **Sequential** and **Race** both support `MaxRetries` / `BackoffBase` / `BackoffMultiplier` for capacity error retries.
 - All strategies (except passthrough) work with `AllowedRegions` for cross-region fallback.
 
+### Common Usage Patterns
+
+```python
+# ── Pattern 1: Drop-in replacement (passthrough) ─────────────────────
+# No SDK params → identical to boto3
+launch_create_transform_job(
+    TransformJobName="my-job", ModelName="my-model",
+    TransformResources={"InstanceType": "ml.g5.4xlarge", "InstanceCount": 1},
+    TransformInput={...}, TransformOutput={...},
+)
+
+# ── Pattern 2: Manual fallback list ──────────────────────────────────
+# You pick the types and order
+launch_create_transform_job(
+    ...,
+    TransformResources={"InstanceType": ["ml.g5.4xlarge", "ml.g4dn.xlarge"], "InstanceCount": 1},
+    Strategy="sequential",              # try in order
+)
+
+# ── Pattern 3: Race your fallback list ───────────────────────────────
+# All types submitted in parallel, first wins
+launch_create_transform_job(
+    ...,
+    TransformResources={"InstanceType": ["ml.g5.4xlarge", "ml.g4dn.xlarge"], "InstanceCount": 1},
+    Strategy="race",                    # parallel, first wins
+)
+
+# ── Pattern 4: Retry on capacity errors ──────────────────────────────
+# Sequential + retry: each type retried before moving to next
+launch_create_transform_job(
+    ...,
+    TransformResources={"InstanceType": ["ml.g5.4xlarge", "ml.g4dn.xlarge"], "InstanceCount": 1},
+    Strategy="sequential",
+    MaxRetries=3,                       # retry capacity errors (30s, 60s, 120s)
+)
+
+# ── Pattern 5: Single type + retry (no expansion) ───────────────────
+# Just retry this one type, nothing else
+launch_create_transform_job(
+    ...,
+    TransformResources={"InstanceType": "ml.g4dn.xlarge", "InstanceCount": 1},
+    MaxRetries=5,                       # retry this type up to 5 times
+)
+
+# ── Pattern 6: AI picks the types (Bedrock) ─────────────────────────
+# Bedrock reasons about GPU memory, cost, quotas
+launch_create_transform_job(
+    ...,
+    TransformResources={"InstanceType": "ml.g4dn.xlarge", "InstanceCount": 1},
+    Strategy="intelligent",             # MUST be explicit
+    WorkloadDescription="ResNet-50 fp32, ~200MB GPU, cost-sensitive",
+)
+
+# ── Pattern 7: AI picks the types (no Bedrock) ──────────────────────
+# TypeExpander: deterministic, same-or-larger types, no permissions needed
+launch_create_transform_job(
+    ...,
+    TransformResources={"InstanceType": "ml.g4dn.xlarge", "InstanceCount": 1},
+    Strategy="intelligent",             # MUST be explicit
+    # No WorkloadDescription → TypeExpander (deterministic)
+)
+
+# ── Pattern 8: Cross-region + race + retry ───────────────────────────
+# Full resilience: race in each region, retry on capacity, multi-region
+launch_create_transform_job(
+    ...,
+    TransformResources={"InstanceType": ["ml.g5.4xlarge", "ml.g4dn.xlarge"], "InstanceCount": 1},
+    Strategy="race",
+    MaxRetries=2,
+    AllowedRegions=["us-east-1", "us-west-2"],
+    RegionConfig={"us-west-2": {"ModelName": "my-model-usw2"}},
+)
+
+# ── Pattern 9: AI + cross-region ─────────────────────────────────────
+# Bedrock picks types, then falls back across regions
+launch_create_transform_job(
+    ...,
+    TransformResources={"InstanceType": "ml.g4dn.xlarge", "InstanceCount": 1},
+    Strategy="intelligent",
+    WorkloadDescription="XGBoost classification, cost-sensitive",
+    AllowedRegions=["us-east-1", "us-west-2"],
+    RegionConfig={"us-west-2": {"ModelName": "my-model-usw2"}},
+)
+```
+
 ## Installation
 
 ### From GitLab (recommended)
