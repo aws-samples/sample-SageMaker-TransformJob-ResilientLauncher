@@ -24,7 +24,7 @@ Four strategies control how the SDK handles your job — set via the `Strategy` 
 **Key rules:**
 - **Passthrough** is the default when no SDK params are present — true drop-in for boto3.
 - **Intelligent** must be explicitly set. It is never triggered automatically.
-- **Sequential** and **Race** support `MaxRetries` / `BackoffBase` / `BackoffMultiplier` for capacity error retries.
+- **Sequential**, **Race**, and **Intelligent** all support `MaxRetries` / `BackoffBase` / `BackoffMultiplier` for capacity error retries. Only **Passthrough** has no retries.
 - All strategies (except passthrough) combine with `AllowedRegions` for cross-region fallback.
 
 Migration from native boto3 requires changing a single import. With no SDK parameters, behavior is identical to boto3.
