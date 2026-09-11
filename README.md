@@ -20,7 +20,7 @@ This SDK wraps boto3's `create_transform_job` to provide five behaviors — all 
 | **Race (Parallel)** | `Strategy="race"` | All types submitted concurrently; first to provision wins, losers cancelled |
 | **Cross-Region** | `AllowedRegions` with 2+ regions | Falls back to other regions when the home region is exhausted |
 
-Migration from native boto3 requires changing a single import.
+Migration from native boto3 requires changing a single import. With no SDK parameters, behavior is identical to boto3.
 
 ## Installation
 
@@ -252,7 +252,7 @@ The SDK infers the correct behavior from the shape of your input:
 
 | InstanceType Shape | Strategy Param | AllowedRegions | Behavior |
 |---|---|---|---|
-| Scalar string | absent | absent or 1 region | **AI Expansion** then sequential. Bedrock if `WorkloadDescription` present, TypeExpander otherwise. |
+| Scalar string | absent | absent or 1 region | **Passthrough** (no SDK params) or **AI Expansion** (if `WorkloadDescription` or `MaxRetries` present). Default = passthrough = identical to boto3. |
 | Scalar string | absent | 2+ regions | **Cross-region** with single type, sequential per region. |
 | Scalar string | explicit (not passthrough) | any | Execute specified strategy with the single type. |
 | Scalar string | `"passthrough"` | any | **Native passthrough.** Direct boto3. Zero SDK logic. |
@@ -265,11 +265,13 @@ The SDK infers the correct behavior from the shape of your input:
 
 1. **Passthrough** (`Strategy="passthrough"`): Handled first. The request is forwarded directly to boto3 with zero SDK logic, zero retry, zero error classification. Returns the raw boto3 API response as a `dict`.
 
-2. **Scalar input, no Strategy**: The SDK expands the single instance type into a fallback list. If `WorkloadDescription` is provided, the `IntelligentRouter` calls Bedrock Converse with deterministic quota/pricing facts to reason about GPU memory fit. Otherwise, the `TypeExpander` generates the list using hardcoded GPU metadata (same-or-larger types, filtered by non-zero quota). The expanded list is executed via sequential fallback.
+2. **No SDK params at all + scalar type**: Passthrough. The call goes directly to boto3 with zero SDK logic. This is the default — making the SDK a true drop-in replacement for `boto3.client("sagemaker").create_transform_job()`.
 
-3. **List input or explicit Strategy**: The caller's list is used in exact order. No AI expansion, no reordering. The specified (or defaulted) strategy engine executes the list.
+3. **Scalar input + SDK params present (no explicit Strategy)**: The SDK expands the single instance type into a fallback list. If `WorkloadDescription` is provided, the `IntelligentRouter` calls Bedrock Converse with deterministic quota/pricing facts to reason about GPU memory fit. Otherwise, the `TypeExpander` generates the list using hardcoded GPU metadata (same-or-larger types, filtered by non-zero quota). The expanded list is executed via sequential fallback.
 
-4. **Cross-region**: When `AllowedRegions` contains 2+ regions, the `CrossRegionManager` tries each region in order. Pre-flight checks, data replication, and output retrieval are handled automatically.
+4. **List input or explicit Strategy**: The caller's list is used in exact order. No AI expansion, no reordering. The specified (or defaulted) strategy engine executes the list.
+
+5. **Cross-region**: When `AllowedRegions` contains 2+ regions, the `CrossRegionManager` tries each region in order. Pre-flight checks, data replication, and output retrieval are handled automatically.
 
 ## Cross-Region Deep Dive
 
@@ -547,7 +549,7 @@ Accepts all boto3 `create_transform_job` PascalCase parameters, plus:
 
 | SDK Parameter | Type | Default | Description |
 |---|---|---|---|
-| `Strategy` | `str` | Inferred | `"passthrough"`, `"sequential"`, or `"race"`. Omit to let the SDK infer from input shape. |
+| `Strategy` | `str` | `"passthrough"` | `"passthrough"`, `"sequential"`, or `"race"`. Default is passthrough when no SDK params are present (true drop-in). |
 | `AllowedRegions` | `list[str]` | None | AWS regions for cross-region fallback. First region is the home region. |
 | `WorkloadDescription` | `str` | None | Natural-language workload description for Bedrock-powered AI expansion. |
 | `RegionConfig` | `dict` | None | Per-region configuration. Keys are region names, values are dicts with optional `ModelName`. |

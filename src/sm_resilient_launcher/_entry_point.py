@@ -2,12 +2,15 @@
 
 The single public API for launching SageMaker Batch Transform jobs with
 capacity resilience.  Accepts all boto3 ``create_transform_job``
-PascalCase parameters plus three SDK-specific parameters: ``Strategy``,
-``AllowedRegions``, and ``WorkloadDescription``.
+PascalCase parameters plus SDK-specific parameters.
+
+**Default behavior:** When no SDK-specific parameters are provided,
+the function behaves identically to ``boto3.client("sagemaker")
+.create_transform_job()``.  This makes it a true drop-in replacement.
 
 Return type is ``LaunchResult | dict``:
 
-* ``dict`` — when ``Strategy="passthrough"`` (raw boto3 response).
+* ``dict`` — when passthrough (no SDK params, or ``Strategy="passthrough"``).
 * ``LaunchResult`` — for all other execution paths.
 
 Requirements covered: 1.4, 1.6, 1.7, 2.1–2.8, 4.1–4.3.
@@ -32,7 +35,7 @@ def launch_create_transform_job(**kwargs) -> LaunchResult | dict:
     """Launch a SageMaker Batch Transform job with capacity resilience.
 
     Accepts every parameter that boto3's ``create_transform_job``
-    accepts (PascalCase names), plus three SDK-specific parameters:
+    accepts (PascalCase names), plus SDK-specific parameters:
 
     * ``Strategy`` — ``"passthrough"``, ``"sequential"``, or
       ``"race"``.  Omit to let the SDK infer from input shape.
@@ -40,8 +43,19 @@ def launch_create_transform_job(**kwargs) -> LaunchResult | dict:
       fallback.
     * ``WorkloadDescription`` — natural-language workload description
       for AI-powered type expansion via Bedrock.
+    * ``RegionConfig`` — per-region overrides (ModelName, etc.).
+    * ``AutoCreateModel`` — auto-create models in target regions.
+    * ``MaxRetries`` — retry attempts on capacity errors.
+    * ``BackoffBase`` — seconds before first retry.
+    * ``BackoffMultiplier`` — exponential backoff multiplier.
 
-    **Passthrough path** (``Strategy="passthrough"``):
+    **Default behavior (no SDK params):**
+        When no SDK-specific parameters are provided and InstanceType
+        is a scalar string, the function is a direct passthrough to
+        boto3 — identical behavior to the native API.  This makes it
+        a true drop-in replacement: just change the import.
+
+    **Passthrough path** (``Strategy="passthrough"`` or no SDK params):
         Calls ``boto3.client("sagemaker").create_transform_job()``
         directly with zero SDK logic, zero retry, zero error
         classification, and returns the raw boto3 API response
@@ -54,8 +68,7 @@ def launch_create_transform_job(**kwargs) -> LaunchResult | dict:
 
     Args:
         **kwargs: All boto3 ``create_transform_job`` PascalCase
-            parameters, plus ``Strategy``, ``AllowedRegions``, and
-            ``WorkloadDescription``.
+            parameters, plus SDK-specific params listed above.
 
     Returns:
         ``LaunchResult`` for non-passthrough paths, or a raw ``dict``
@@ -72,8 +85,17 @@ def launch_create_transform_job(**kwargs) -> LaunchResult | dict:
         kwargs
     )
 
-    # ── 2. Passthrough path — zero SDK logic ───────────────────
-    if sdk_params.get("Strategy") == "passthrough":
+    # ── 2. Passthrough: explicit or default (no SDK params) ────
+    #
+    # Passthrough when:
+    #   a) Strategy="passthrough" is explicitly set, OR
+    #   b) No SDK params at all AND InstanceType is scalar
+    #      (true drop-in replacement for boto3)
+    explicit_passthrough = sdk_params.get("Strategy") == "passthrough"
+    no_sdk_params = len(sdk_params) == 0
+    default_passthrough = no_sdk_params and not is_list_mode
+
+    if explicit_passthrough or default_passthrough:
         session = boto3.session.Session()
         region = session.region_name or "us-east-1"
         client = boto3.client("sagemaker", region_name=region)
