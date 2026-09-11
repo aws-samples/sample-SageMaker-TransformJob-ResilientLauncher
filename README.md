@@ -190,6 +190,101 @@ print(result.agent_reasoning)
 #  ml.g4dn.xlarge, ml.g5.xlarge, ml.g4dn.2xlarge, ml.g5.4xlarge."
 ```
 
+
+
+### Full API Example (all options)
+
+```python
+from sm_resilient_launcher import launch_create_transform_job
+
+result = launch_create_transform_job(
+
+    # ── Standard boto3 parameters (passed through unchanged) ──────────
+
+    TransformJobName="my-batch-job",           # str  — unique job name
+    ModelName="my-xgboost-model",              # str  — SageMaker Model name
+    TransformInput={
+        "DataSource": {
+            "S3DataSource": {
+                "S3DataType": "S3Prefix",      # "S3Prefix" | "ManifestFile" | "AugmentedManifestFile"
+                "S3Uri": "s3://my-bucket/input/",
+            }
+        },
+        "ContentType": "text/csv",             # str  — MIME type of input data
+        "SplitType": "Line",                   # "None" | "Line" | "RecordIO" | "TFRecord"
+    },
+    TransformOutput={
+        "S3OutputPath": "s3://my-bucket/output/",
+        "AssembleWith": "Line",                # "None" | "Line"  (optional)
+    },
+    TransformResources={
+        "InstanceType": [                      # str | list[str]  — single type or priority list
+            "ml.g5.4xlarge",                   #   first choice
+            "ml.g4dn.2xlarge",                 #   fallback 1
+            "ml.g4dn.xlarge",                  #   fallback 2
+        ],
+        "InstanceCount": 1,                    # int  — instances per job (1-100)
+    },
+    MaxConcurrentTransforms=4,                 # int  — parallel inference workers (optional)
+    MaxPayloadInMB=6,                          # int  — max payload per request in MB (optional)
+    BatchStrategy="MultiRecord",               # "MultiRecord" | "SingleRecord"  (optional)
+
+    # ── SDK-specific parameters ───────────────────────────────────────
+
+    Strategy="race",                           # "passthrough" | "sequential" | "race"
+                                               #   passthrough  — direct boto3 call, zero SDK logic
+                                               #   sequential   — try types in order
+                                               #   race         — all types in parallel, first wins
+                                               #   (default: passthrough when no SDK params present)
+
+    MaxRetries=3,                              # int  — retry attempts on capacity errors (default: 0)
+    BackoffBase=30,                            # int  — seconds before first retry (default: 30)
+    BackoffMultiplier=2.0,                     # float — exponential multiplier (default: 2.0)
+                                               #   waits: 30s, 60s, 120s for MaxRetries=3
+                                               #   only capacity errors retry; quota errors skip
+
+    AllowedRegions=[                           # list[str] — regions for cross-region fallback
+        "us-east-1",                           #   first region is the home region
+        "us-west-2",                           #   tried sequentially if home region exhausted
+        "eu-west-1",
+    ],
+
+    RegionConfig={                             # dict — per-region overrides
+        "us-west-2": {
+            "ModelName": "my-model-usw2",      #   model name in target region
+            "TransformOutput": {               #   output path override (different bucket)
+                "S3OutputPath": "s3://my-bucket-us-west-2/output/",
+            },
+        },
+        "eu-west-1": {
+            "ModelName": "my-model-euw1",
+        },
+    },
+
+    AutoCreateModel=True,                      # bool — auto-create SageMaker Model in target regions
+                                               #   resolves ECR image per region
+                                               #   copies model artifact to mirror bucket
+                                               #   (default: False)
+
+    WorkloadDescription=(                      # str — natural language for Bedrock AI expansion
+        "ResNet-50 inference, fp32, "          #   triggers IntelligentRouter when InstanceType
+        "~200MB GPU memory, cost-sensitive"    #   is a single type (not a list)
+    ),
+)
+
+# ── Result ────────────────────────────────────────────────────────────
+
+print(result.job_name)              # str  — winning job name
+print(result.instance_type_used)    # str  — instance type that succeeded
+print(result.region_used)           # str  — region where job ran
+print(result.attempts)              # int  — total submission attempts
+print(result.strategy_used)         # str  — "sequential" | "race"
+print(result.agent_reasoning)       # str | None — Bedrock reasoning (if AI was used)
+print(result.data_replicated)       # bool — True if cross-region data copy occurred
+print(result.errors)                # list[ClassifiedError] — all failed attempts
+print(result.warnings)              # list[str] — pre-flight warnings
+```
+
 ## Architecture
 
 ```
