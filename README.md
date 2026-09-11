@@ -10,32 +10,24 @@ GPU batch workloads require manual resubmission with different instance types un
 
 ## The Solution
 
-This SDK wraps boto3's `create_transform_job` to provide five behaviors — all accessible through a single function that uses the exact same PascalCase parameter names as the native API:
+This SDK wraps boto3's `create_transform_job` to provide automatic capacity resilience — accessible through a single function that uses the exact same PascalCase parameter names as the native API.
 
-| Behavior | When | What Happens |
-|---|---|---|
-| **Native Passthrough** | `Strategy="passthrough"` | Direct boto3 call, zero SDK logic, returns raw dict |
-| **AI Expansion** | Single type, no Strategy | TypeExpander (deterministic) or Bedrock Converse generates a same-or-larger fallback list |
-| **Sequential Fallback** | List of types or `Strategy="sequential"` | Types tried in order; error classification drives skip behavior |
-| **Race (Parallel)** | `Strategy="race"` | All types submitted concurrently; first to provision wins, losers cancelled |
-| **Cross-Region** | `AllowedRegions` with 2+ regions | Falls back to other regions when the home region is exhausted |
-
-Migration from native boto3 requires changing a single import. With no SDK parameters, behavior is identical to boto3.
-
-## Strategies
+Four strategies control how the SDK handles your job — set via the `Strategy` parameter:
 
 | Strategy | Value | How it works | Best for |
 |---|---|---|---|
-| **Passthrough** | `"passthrough"` or omit all SDK params | Direct boto3 call. Zero SDK logic. Returns raw API dict. | Drop-in replacement, testing, when you don't need resilience |
-| **Sequential** | `"sequential"` | Tries instance types one at a time in your exact order. Supports retry with exponential backoff on capacity errors. | Controlled fallback with predictable cost. Most common. |
-| **Race** | `"race"` | Submits ALL types simultaneously. First to complete wins, rest are cancelled. Supports retry rounds on all-capacity failures. | Fastest time-to-result when you can tolerate brief parallel billing |
-| **Intelligent** | `"intelligent"` | **Must be explicit.** If `WorkloadDescription` provided → tries Bedrock AI first, falls back to TypeExpander on failure. Without `WorkloadDescription` → TypeExpander directly. Generates a prioritized fallback list, then executes with AI-recommended sub-strategy. | When you want the SDK to find alternative instance types |
+| **Passthrough** | `"passthrough"` or omit all SDK params | Direct boto3 call. Zero SDK logic. Returns raw API dict. | Drop-in replacement, testing |
+| **Sequential** | `"sequential"` | Tries instance types one at a time in your exact order. Supports retry with exponential backoff on capacity errors. | Controlled fallback, predictable cost |
+| **Race** | `"race"` | Submits ALL types simultaneously. First to complete wins, rest cancelled. Supports retry rounds. | Fastest time-to-result |
+| **Intelligent** | `"intelligent"` | **Must be explicit.** With `WorkloadDescription` → Bedrock AI (falls back to TypeExpander on failure). Without → TypeExpander (deterministic). Generates a prioritized list, then executes with AI-recommended sub-strategy. | SDK finds alternative types for you |
 
-Notes:
-- **Passthrough** is the default when no SDK params are present — this makes the SDK a true drop-in for boto3.
-- **Intelligent** must be explicitly set with `Strategy="intelligent"`. It is never triggered automatically. If `WorkloadDescription` is provided, Bedrock AI is tried first; if that fails (permissions, errors), it falls back to deterministic TypeExpander.
-- **Sequential** and **Race** both support `MaxRetries` / `BackoffBase` / `BackoffMultiplier` for capacity error retries.
-- All strategies (except passthrough) work with `AllowedRegions` for cross-region fallback.
+**Key rules:**
+- **Passthrough** is the default when no SDK params are present — true drop-in for boto3.
+- **Intelligent** must be explicitly set. It is never triggered automatically.
+- **Sequential** and **Race** support `MaxRetries` / `BackoffBase` / `BackoffMultiplier` for capacity error retries.
+- All strategies (except passthrough) combine with `AllowedRegions` for cross-region fallback.
+
+Migration from native boto3 requires changing a single import. With no SDK parameters, behavior is identical to boto3.
 
 ### Common Usage Patterns
 
