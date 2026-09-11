@@ -1,17 +1,7 @@
 """Launcher — job-type-agnostic orchestrator applying the behavior matrix.
 
 Applies the strategy selection logic from the caller's input shape
-to determine the execution path:
-
-| InstanceType Shape | Strategy Param | AllowedRegions  | Behavior                           |
-|--------------------|----------------|-----------------|-------------------------------------|
-| Scalar (1 item)    | absent         | absent/1 region | AI Expansion → sequential           |
-| Scalar (1 item)    | absent         | 2+ regions      | Cross-region with single type       |
-| Scalar (1 item)    | explicit       | any             | Execute specified strategy          |
-| List               | absent         | any             | Sequential with caller's order      |
-| List               | explicit       | any             | Execute specified strategy          |
-
-Passthrough is handled upstream in the entry point, NOT here.
+to determine the execution path. Threads retry/backoff params to engines.
 
 Contains NO Batch Transform-specific logic — works through the
 ``JobAdapter`` interface exclusively.
@@ -41,15 +31,13 @@ class Launcher:
 
     Applies the behavior matrix:
 
-    - Scalar + no Strategy + no/single region → AI Expansion → sequential
-    - Scalar + no Strategy + multi-region → cross-region with single type
-    - Scalar + explicit Strategy → execute strategy with single type
-    - List + no Strategy → sequential with caller's order
-    - List + explicit Strategy → execute strategy with caller's order
+    - Scalar + no Strategy + no/single region -> AI Expansion -> sequential
+    - Scalar + no Strategy + multi-region -> cross-region with single type
+    - Scalar + explicit Strategy -> execute strategy with single type
+    - List + no Strategy -> sequential with caller's order
+    - List + explicit Strategy -> execute strategy with caller's order
 
     Passthrough is handled upstream in the entry point, not here.
-
-    Requirements covered: 2.1, 2.2, 2.3, 2.5, 2.6, 2.7, 15.1, 15.2, 15.3.
     """
 
     def __init__(
@@ -73,23 +61,7 @@ class Launcher:
         sdk_params: dict,
         region: str,
     ) -> LaunchResult:
-        """Execute the requested strategy per the behavior matrix.
-
-        Args:
-            instance_types: Priority list of candidate instance types.
-                For scalar inputs, this is a single-element list.
-            boto3_params: Parameters for the underlying create_job call.
-            sdk_params: SDK-specific params (``Strategy``,
-                ``AllowedRegions``, ``WorkloadDescription``).
-            region: The primary/home region.
-
-        Returns:
-            LaunchResult on success.
-
-        Raises:
-            AllTypesExhaustedError or AllRegionsExhaustedError on
-            failure.
-        """
+        """Execute the requested strategy per the behavior matrix."""
         strategy = sdk_params.get("Strategy")
         allowed_regions = sdk_params.get("AllowedRegions")
         workload_desc = sdk_params.get("WorkloadDescription")
@@ -98,6 +70,11 @@ class Launcher:
         base_job_name = boto3_params.get(
             "TransformJobName", "sm-resilient"
         )
+
+        # Retry / backoff params
+        max_retries = sdk_params.get("MaxRetries", 0)
+        backoff_base = sdk_params.get("BackoffBase", 30)
+        backoff_multiplier = sdk_params.get("BackoffMultiplier", 2.0)
 
         agent_reasoning: str | None = None
         is_scalar = len(instance_types) == 1
@@ -109,11 +86,8 @@ class Launcher:
             )
 
             if has_multi_region:
-                # Req 2.2: Scalar + no Strategy + multi-region →
-                # cross-region with single type, sequential per region.
                 strategy = "sequential"
             elif workload_desc and self._intelligent_router:
-                # Req 2.1 (with WorkloadDescription): IntelligentRouter
                 ordered_types, rec_strategy, reasoning = (
                     self._intelligent_router.generate_plan(
                         instance_types[0], workload_desc
@@ -123,16 +97,13 @@ class Launcher:
                 strategy = rec_strategy
                 agent_reasoning = reasoning
             elif self._type_expander:
-                # Req 2.1 (without WorkloadDescription): TypeExpander
                 instance_types = self._type_expander.expand(
                     instance_types[0], region
                 )
                 strategy = "sequential"
             else:
-                # No expansion available — single type, sequential.
                 strategy = "sequential"
 
-        # ── Default strategy for list mode (Req 2.5) ──
         if strategy is None:
             strategy = "sequential"
 
@@ -146,6 +117,9 @@ class Launcher:
                 allowed_regions,
                 region_config,
                 auto_create_model,
+                max_retries,
+                backoff_base,
+                backoff_multiplier,
             )
         else:
             result = self._execute_single_region(
@@ -154,9 +128,11 @@ class Launcher:
                 base_job_name,
                 strategy,
                 region,
+                max_retries,
+                backoff_base,
+                backoff_multiplier,
             )
 
-        # Req 15.2: Attach agent_reasoning when Bedrock was used.
         if agent_reasoning is not None:
             result.agent_reasoning = agent_reasoning
 
@@ -171,9 +147,14 @@ class Launcher:
         base_job_name: str,
         strategy: str,
         region: str,
+        max_retries: int = 0,
+        backoff_base: int = 30,
+        backoff_multiplier: float = 2.0,
     ) -> LaunchResult:
         """Delegate to the strategy engine for a single region."""
-        engine = self._build_engine(strategy, self._adapter)
+        engine = self._build_engine(
+            strategy, self._adapter, max_retries, backoff_base, backoff_multiplier
+        )
         return engine.execute(
             instance_types=instance_types,
             boto3_params=boto3_params,
@@ -190,16 +171,16 @@ class Launcher:
         allowed_regions: list[str],
         region_config: dict | None = None,
         auto_create_model: bool = False,
+        max_retries: int = 0,
+        backoff_base: int = 30,
+        backoff_multiplier: float = 2.0,
     ) -> LaunchResult:
-        """Delegate to CrossRegionManager for multi-region fallback.
-
-        The home region is the first element of ``allowed_regions``.
-        """
+        """Delegate to CrossRegionManager for multi-region fallback."""
         home_region = allowed_regions[0]
         manager = CrossRegionManager(
             adapter_factory=self._adapter_factory,
             strategy_engine_factory=lambda adapter: self._build_engine(
-                strategy, adapter
+                strategy, adapter, max_retries, backoff_base, backoff_multiplier
             ),
             home_region=home_region,
             allowed_regions=allowed_regions,
@@ -212,23 +193,29 @@ class Launcher:
         )
 
     def _build_engine(
-        self, strategy: str, adapter: JobAdapter
+        self,
+        strategy: str,
+        adapter: JobAdapter,
+        max_retries: int = 0,
+        backoff_base: int = 30,
+        backoff_multiplier: float = 2.0,
     ) -> SequentialEngine | RaceEngine:
-        """Instantiate the strategy engine for the requested strategy.
-
-        Args:
-            strategy: ``"sequential"`` or ``"race"``.
-            adapter: The ``JobAdapter`` to pass to the engine.
-
-        Returns:
-            A ``SequentialEngine`` or ``RaceEngine`` instance.
-
-        Raises:
-            ValueError: If ``strategy`` is unrecognised.
-        """
+        """Instantiate the strategy engine with retry params."""
         if strategy == "sequential":
-            return SequentialEngine(adapter, self._classifier)
+            return SequentialEngine(
+                adapter,
+                self._classifier,
+                max_retries=max_retries,
+                backoff_base=backoff_base,
+                backoff_multiplier=backoff_multiplier,
+            )
         elif strategy == "race":
-            return RaceEngine(adapter, self._classifier)
+            return RaceEngine(
+                adapter,
+                self._classifier,
+                max_retries=max_retries,
+                backoff_base=backoff_base,
+                backoff_multiplier=backoff_multiplier,
+            )
         else:
             raise ValueError(f"Unknown strategy: {strategy}")

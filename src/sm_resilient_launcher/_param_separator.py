@@ -4,12 +4,22 @@
 class ParamSeparator:
     """Separates SDK-specific params from boto3 create_transform_job params.
 
-    SDK-specific parameters (Strategy, AllowedRegions, WorkloadDescription) are
-    extracted into their own dict. Everything else — including unrecognized
-    parameters — is forwarded unchanged to boto3 for forward compatibility.
+    SDK-specific parameters are extracted into their own dict.
+    Everything else — including unrecognized parameters — is forwarded
+    unchanged to boto3 for forward compatibility.
     """
 
-    SDK_PARAMS = {"Strategy", "AllowedRegions", "WorkloadDescription", "RegionConfig", "AutoCreateModel"}
+    SDK_PARAMS = {
+        "Strategy",
+        "AllowedRegions",
+        "WorkloadDescription",
+        "RegionConfig",
+        "AutoCreateModel",
+        # Retry / backoff params (mirrors SageMaker Pipelines naming)
+        "MaxRetries",
+        "BackoffBase",
+        "BackoffMultiplier",
+    }
 
     @staticmethod
     def separate(kwargs: dict) -> tuple[dict, dict, bool]:

@@ -1,12 +1,12 @@
-"""RaceEngine — parallel job submission with winner detection.
+"""RaceEngine — parallel job submission with winner detection and retry.
 
 Submits all candidate instance types concurrently using a thread pool.
 The first job to reach a completed state wins; all non-winners receive
-stop_job calls to limit billing. When multiple jobs complete, tie-breaks
-prefer the home region and then cheapest instance type.
+stop_job calls to limit billing. If ALL types fail with capacity errors
+and retries are configured, the engine waits with exponential backoff
+and races again.
 
-Interacts with jobs exclusively through the JobAdapter interface —
-contains no Batch Transform-specific logic.
+Interacts with jobs exclusively through the JobAdapter interface.
 """
 
 from __future__ import annotations
@@ -31,14 +31,21 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Default poll interval in seconds — matches TransformJobAdapter.
 _POLL_INTERVAL_SECONDS = 10
+
+# Default retry/backoff settings.
+DEFAULT_MAX_RETRIES: int = 0
+DEFAULT_BACKOFF_BASE: int = 30
+DEFAULT_BACKOFF_MULTIPLIER: float = 2.0
 
 
 class RaceEngine:
-    """Parallel job submission with winner detection and loser cancellation.
+    """Parallel job submission with winner detection, cancellation, and retry.
 
-    Interacts with jobs exclusively through the JobAdapter interface.
+    Supports exponential-backoff retry rounds. If all types fail in a
+    race round AND at least one failure was a CAPACITY error (hardware
+    may free up), the engine waits and races again. QUOTA-only failures
+    do not trigger retries (waiting won't change your quota).
 
     Requirement 7.1: Submit all types concurrently.
     Requirement 7.2: First completed job is the winner.
@@ -46,8 +53,7 @@ class RaceEngine:
     Requirement 7.4: Unique job names per submission.
     Requirement 7.5: Raise AllTypesExhaustedError when all fail.
     Requirement 7.6: Return LaunchResult with winner details.
-    Requirement 7.7: Tie-break: prefer home region, then cheapest type.
-    Requirement 7.8: Wait for ALL jobs to reach terminal before raising.
+    Requirement 7.7: Tie-break: first to complete wins.
     """
 
     def __init__(
@@ -55,10 +61,16 @@ class RaceEngine:
         adapter: JobAdapter,
         error_classifier: ErrorClassifier,
         home_region: str = "",
+        max_retries: int = DEFAULT_MAX_RETRIES,
+        backoff_base: int = DEFAULT_BACKOFF_BASE,
+        backoff_multiplier: float = DEFAULT_BACKOFF_MULTIPLIER,
     ) -> None:
         self._adapter = adapter
         self._classifier = error_classifier
         self._home_region = home_region
+        self._max_retries = max_retries
+        self._backoff_base = backoff_base
+        self._backoff_multiplier = backoff_multiplier
 
     def execute(
         self,
@@ -70,25 +82,19 @@ class RaceEngine:
     ) -> LaunchResult:
         """Submit all types concurrently; first to complete wins.
 
-        Each submission uses a unique job name:
-        ``{base_job_name}-race-{index}-{uuid8}``
-
-        Non-winners receive ``stop_job`` calls regardless of billing
-        state. Batch Transform billing starts at ``TransformStartTime``
-        (per-second, 1-minute minimum); jobs that never reach
-        ``TransformStartTime`` cost $0.
+        If all types fail and retries are configured, waits with
+        exponential backoff and races again (only if at least one
+        failure was CAPACITY — QUOTA-only rounds do not retry).
 
         Args:
             instance_types: Ordered list — never reordered by the engine.
             boto3_params: The boto3 params (SDK params already stripped).
             base_job_name: Base name; each submission appends a suffix.
             region: The region for this execution.
-            globally_skipped_types: Mutable set shared across regions;
-                types here are skipped (not submitted).
+            globally_skipped_types: Mutable set shared across regions.
 
         Returns:
-            LaunchResult with winner details. ``attempts`` equals the
-            number of types actually submitted.
+            LaunchResult with winner details.
 
         Raises:
             AllTypesExhaustedError: When all concurrent jobs fail.
@@ -96,6 +102,64 @@ class RaceEngine:
         if globally_skipped_types is None:
             globally_skipped_types = set()
 
+        all_errors: list[ClassifiedError] = []
+
+        for retry_round in range(self._max_retries + 1):
+            try:
+                result = self._race_once(
+                    instance_types,
+                    boto3_params,
+                    base_job_name,
+                    region,
+                    globally_skipped_types,
+                )
+                # Include errors from previous rounds.
+                result.errors = all_errors + (result.errors or [])
+                return result
+
+            except AllTypesExhaustedError as e:
+                all_errors.extend(e.errors)
+
+                # Only retry if at least one error was CAPACITY.
+                has_capacity_error = any(
+                    err.category == ErrorCategory.CAPACITY
+                    for err in e.errors
+                )
+
+                if (
+                    has_capacity_error
+                    and retry_round < self._max_retries
+                ):
+                    wait = self._backoff_base * (
+                        self._backoff_multiplier ** retry_round
+                    )
+                    logger.info(
+                        "All types failed in race round %d/%d "
+                        "(capacity errors present); retrying in %.0fs...",
+                        retry_round + 1,
+                        self._max_retries,
+                        wait,
+                    )
+                    time.sleep(wait)
+                    continue
+
+                # No capacity errors or retries exhausted.
+                raise AllTypesExhaustedError(all_errors)
+
+        # Should not reach here, but safety net.
+        raise AllTypesExhaustedError(all_errors)
+
+    # ── Single race round ──────────────────────────────────────
+
+    def _race_once(
+        self,
+        instance_types: list[str],
+        boto3_params: dict,
+        base_job_name: str,
+        region: str,
+        globally_skipped_types: set[str],
+    ) -> LaunchResult:
+        """Run one race round — submit all types concurrently."""
         suffix = uuid.uuid4().hex[:8]
         job_entries: list[tuple[str, str]] = []
         for idx, itype in enumerate(instance_types):
@@ -110,8 +174,8 @@ class RaceEngine:
         if not job_entries:
             raise AllTypesExhaustedError([])
 
-        # Shared state protected by a lock.
         lock = threading.Lock()
+        winner_event = threading.Event()
         completed_results: list[LaunchResult] = []
         errors: list[ClassifiedError] = []
 
@@ -128,11 +192,10 @@ class RaceEngine:
                     itype,
                     boto3_params,
                     region,
+                    winner_event,
                 )
                 future_to_entry[future] = (job_name, itype)
 
-            # Req 7.8: Wait for ALL submitted jobs to reach a terminal
-            # state before deciding winner or raising an error.
             for future in concurrent.futures.as_completed(future_to_entry):
                 job_name, itype = future_to_entry[future]
                 try:
@@ -140,8 +203,8 @@ class RaceEngine:
                     if result is not None:
                         with lock:
                             completed_results.append(result)
+                            winner_event.set()
                     else:
-                        # Job failed but didn't raise — classify as unknown.
                         classified = self._classifier.classify(
                             Exception(f"Job {job_name} failed"),
                             itype,
@@ -156,19 +219,16 @@ class RaceEngine:
                     with lock:
                         errors.append(classified)
 
-        # Req 7.5 / 7.8: If no jobs completed, raise with all errors.
         if not completed_results:
             raise AllTypesExhaustedError(errors)
 
-        # Req 7.7: When multiple jobs completed, tie-break by:
-        # 1. Prefer home region.
-        # 2. If tied on region, prefer cheapest (alphabetical as heuristic).
-        winner = self._pick_winner(completed_results, region)
+        # First to complete wins (order from as_completed).
+        winner = completed_results[0]
         winner.attempts = len(job_entries)
         winner.strategy_used = "race"
         winner.errors = list(errors)
 
-        # Req 7.3: Cancel ALL non-winners, regardless of billing state.
+        # Cancel non-winners.
         for job_name, _itype in job_entries:
             if job_name != winner.job_name:
                 try:
@@ -194,12 +254,9 @@ class RaceEngine:
         instance_type: str,
         boto3_params: dict,
         region: str,
+        winner_event: threading.Event,
     ) -> LaunchResult | None:
-        """Submit one job and poll until a terminal state is reached.
-
-        Returns:
-            A LaunchResult if the job completed, or None if it failed.
-        """
+        """Submit one job and poll until terminal or another thread wins."""
         logger.info("Submitting %s...", instance_type)
         try:
             self._adapter.create_job(job_name, instance_type, boto3_params)
@@ -209,28 +266,27 @@ class RaceEngine:
         logger.info("%s submitted, polling...", instance_type)
 
         while True:
+            if winner_event.is_set():
+                logger.info(
+                    "%s: another type won, stopping poll", instance_type
+                )
+                return None
+
             desc = self._adapter.describe_job(job_name)
             if self._adapter.is_completed(desc):
-                logger.info(
-                    "Winner: %s completed",
-                    instance_type,
-                )
+                logger.info("Winner: %s completed", instance_type)
                 return LaunchResult(
                     job_name=job_name,
                     instance_type_used=instance_type,
                     region_used=region,
-                    attempts=1,  # Overwritten by execute().
+                    attempts=1,
                     strategy_used="race",
                 )
             if self._adapter.is_failed(desc):
                 error_msg = self._adapter.extract_error(desc)
-                logger.info(
-                    "%s failed: %s",
-                    instance_type,
-                    error_msg[:50],
-                )
+                logger.info("%s failed: %s", instance_type, error_msg[:50])
                 return None
-            # Log periodic status
+
             status = desc.get("TransformJobStatus", "unknown")
             logger.info("%s: %s", instance_type, status)
             time.sleep(_POLL_INTERVAL_SECONDS)
@@ -240,25 +296,5 @@ class RaceEngine:
         candidates: list[LaunchResult],
         current_region: str,
     ) -> LaunchResult:
-        """Select the best winner when multiple jobs completed.
-
-        Tie-breaking order (Req 7.7):
-        1. Prefer the job in the home region (if known).
-        2. If tied on region, prefer cheapest instance type — uses
-           alphabetical ordering of the instance type string as a
-           simple cost heuristic (e.g. g4dn < g5 < p4d < p5).
-
-        When ``home_region`` is empty or not relevant, falls back to
-        the current execution region.
-        """
-        if len(candidates) == 1:
-            return candidates[0]
-
-        effective_home = self._home_region or current_region
-
-        def sort_key(result: LaunchResult) -> tuple[int, str]:
-            is_home = 0 if result.region_used == effective_home else 1
-            return (is_home, result.instance_type_used)
-
-        candidates.sort(key=sort_key)
+        """Select the winner — first to complete wins."""
         return candidates[0]

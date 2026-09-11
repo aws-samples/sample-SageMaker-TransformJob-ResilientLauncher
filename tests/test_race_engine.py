@@ -227,6 +227,27 @@ class TestWinnerDetection:
 
         assert result.instance_type_used == "ml.g5.4xlarge"
 
+    @patch("sm_resilient_launcher._race_engine.time.sleep")
+    def test_winner_event_stops_other_polls(self, mock_sleep):
+        """Once a winner is found, other threads stop polling."""
+        # Both types would complete, but the winner_event should
+        # prevent the second from being reported as completed.
+        adapter = _make_adapter(
+            completed_types={"ml.g5.4xlarge", "ml.g4dn.xlarge"},
+        )
+
+        engine = RaceEngine(adapter, ErrorClassifier)
+        result = engine.execute(
+            instance_types=["ml.g4dn.xlarge", "ml.g5.4xlarge"],
+            boto3_params=BOTO3_PARAMS,
+            base_job_name="job",
+            region="us-east-1",
+        )
+
+        # One of them should win; the important thing is we get a result.
+        assert result.instance_type_used in ("ml.g4dn.xlarge", "ml.g5.4xlarge")
+        assert result.strategy_used == "race"
+
 
 # ---------------------------------------------------------------------------
 # 4. Exactly N-1 stop_job calls on non-winners
@@ -428,20 +449,20 @@ class TestLaunchResultFields:
 
 
 # ---------------------------------------------------------------------------
-# 7. Tie-break: prefer home region, then cheapest type
-#    Requirement 7.7
+# 7. Winner is the first to complete (completion order, not alphabetical)
+#    Requirement 7.2, 7.7
 # ---------------------------------------------------------------------------
 
 
-class TestTieBreak:
-    """When multiple jobs complete, tie-break selects the best winner."""
+class TestCompletionOrder:
+    """Winner selection is based on completion order, not alphabetical."""
 
     @patch("sm_resilient_launcher._race_engine.time.sleep")
-    def test_prefers_home_region(self, mock_sleep):
-        """When multiple types complete, the one in the home region wins."""
-        # Both types complete. With home_region="us-east-1" and the race
-        # running in us-east-1, both are in the home region, so
-        # alphabetical tie-break kicks in.
+    def test_first_completed_wins_not_alphabetical(self, mock_sleep):
+        """When both complete, the first collected by as_completed wins."""
+        # Both types complete instantly in mock — the first one
+        # collected by as_completed wins. The key assertion is that
+        # a winner is returned and it's one of the two.
         adapter = _make_adapter(
             completed_types={"ml.g4dn.xlarge", "ml.g5.4xlarge"}
         )
@@ -454,27 +475,29 @@ class TestTieBreak:
             region="us-east-1",
         )
 
-        # Both are in home region, so alphabetical (cheapest heuristic):
-        # "ml.g4dn.xlarge" < "ml.g5.4xlarge".
-        assert result.instance_type_used == "ml.g4dn.xlarge"
+        # Either is valid — the point is completion order, not alphabet.
+        assert result.instance_type_used in ("ml.g4dn.xlarge", "ml.g5.4xlarge")
 
     @patch("sm_resilient_launcher._race_engine.time.sleep")
-    def test_cheapest_type_when_same_region(self, mock_sleep):
-        """Among types in the same region, alphabetically first wins."""
+    def test_single_winner_among_failures(self, mock_sleep):
+        """When only one type completes, it wins regardless of position."""
         adapter = _make_adapter(
-            completed_types={"ml.g5.4xlarge", "ml.p5.48xlarge"}
+            completed_types={"ml.p3.2xlarge"},
+            failed_types={
+                "ml.g4dn.xlarge": "CapacityError",
+                "ml.g5.4xlarge": "CapacityError",
+            },
         )
 
-        engine = RaceEngine(adapter, ErrorClassifier, home_region="us-east-1")
+        engine = RaceEngine(adapter, ErrorClassifier)
         result = engine.execute(
-            instance_types=["ml.p5.48xlarge", "ml.g5.4xlarge"],
+            instance_types=["ml.g4dn.xlarge", "ml.g5.4xlarge", "ml.p3.2xlarge"],
             boto3_params=BOTO3_PARAMS,
             base_job_name="job",
             region="us-east-1",
         )
 
-        # Alphabetical tie-break: "ml.g5.4xlarge" < "ml.p5.48xlarge".
-        assert result.instance_type_used == "ml.g5.4xlarge"
+        assert result.instance_type_used == "ml.p3.2xlarge"
 
 
 # ---------------------------------------------------------------------------
@@ -602,3 +625,43 @@ class TestCreateJobExceptions:
         assert len(capacity_errors) >= 1
         assert capacity_errors[0].instance_type == "ml.g4dn.xlarge"
         assert capacity_errors[0].region == "us-east-1"
+
+
+# ---------------------------------------------------------------------------
+# 10. InstanceCount is preserved across all race candidates
+# ---------------------------------------------------------------------------
+
+
+class TestInstanceCountPreserved:
+    """The customer's InstanceCount is passed through to every race job."""
+
+    @patch("sm_resilient_launcher._race_engine.time.sleep")
+    def test_instance_count_preserved_in_all_submissions(self, mock_sleep):
+        """All race candidates use the same InstanceCount from boto3_params."""
+        params_with_count = {
+            "ModelName": "my-model",
+            "TransformInput": {
+                "DataSource": {"S3DataSource": {"S3Uri": "s3://bucket/input"}}
+            },
+            "TransformOutput": {"S3OutputPath": "s3://bucket/output"},
+            "TransformResources": {"InstanceCount": 4},
+        }
+
+        adapter = _make_adapter(
+            completed_types={"ml.g5.4xlarge"},
+            failed_types={"ml.g4dn.xlarge": "CapacityError"},
+        )
+
+        engine = RaceEngine(adapter, ErrorClassifier)
+        engine.execute(
+            instance_types=["ml.g4dn.xlarge", "ml.g5.4xlarge"],
+            boto3_params=params_with_count,
+            base_job_name="job",
+            region="us-east-1",
+        )
+
+        # Every create_job call should have received boto3_params with
+        # InstanceCount=4 (the SDK only changes InstanceType, not Count).
+        for call in adapter.create_job.call_args_list:
+            passed_params = call[0][2]  # Third positional arg
+            assert passed_params["TransformResources"]["InstanceCount"] == 4

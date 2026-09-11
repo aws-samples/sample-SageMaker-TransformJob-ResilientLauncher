@@ -425,6 +425,90 @@ Every SageMaker API error is classified into exactly one of four categories usin
 | `family_support` | `not supported`, `not one of the supported values` | Skip type in **all** regions |
 | `unknown` | No markers match | Skip type, try next |
 
+## Retry with Exponential Backoff
+
+SageMaker Batch Transform hard-fails in ~40 seconds when capacity is unavailable. Unlike SageMaker Pipelines (which has built-in retry policies), standalone `create_transform_job` calls have no retry mechanism. This SDK fills that gap.
+
+### How it works
+
+Add `MaxRetries` to enable automatic retries with exponential backoff on capacity errors:
+
+```python
+result = launch_create_transform_job(
+    TransformJobName="my-job",
+    ModelName="my-model",
+    TransformInput={...},
+    TransformOutput={...},
+    TransformResources={
+        "InstanceType": ["ml.g5.4xlarge", "ml.g4dn.xlarge"],
+        "InstanceCount": 2,
+    },
+    Strategy="sequential",
+    MaxRetries=3,           # retry each type up to 3 times on capacity errors
+    BackoffBase=30,         # first wait: 30 seconds (default)
+    BackoffMultiplier=2.0,  # exponential: 30s, 60s, 120s (default)
+)
+```
+
+### Defaults
+
+| Parameter | Default | Description |
+|---|---|---|
+| `MaxRetries` | `0` | No retries. Current behavior preserved when omitted. |
+| `BackoffBase` | `30` | 30 seconds before first retry. |
+| `BackoffMultiplier` | `2.0` | Each retry doubles the wait time. |
+
+You can set just `MaxRetries=3` — the other two use sensible defaults (30s base, 2x multiplier), giving waits of 30s → 60s → 120s.
+
+### Which errors are retried
+
+Only **capacity errors** are retried — hardware may free up. Other error types skip immediately:
+
+| Error Category | Retried? | Reason |
+|---|---|---|
+| `capacity` | **Yes** | Hardware may become available. SageMaker Pipelines also retries these. |
+| `quota` | No | Account quota limit. Waiting won't help — needs a quota increase request. |
+| `family_support` | No | Instance type not supported. Permanent. |
+| `unknown` | No | Unexpected error. Not safe to retry blindly. |
+
+### Sequential mode
+
+Each type is retried individually before moving to the next:
+
+```
+g5.4xlarge attempt 1 → CapacityError → wait 30s
+g5.4xlarge attempt 2 → CapacityError → wait 60s
+g5.4xlarge attempt 3 → CapacityError → retries exhausted, move to g4dn
+g4dn.xlarge attempt 1 → CapacityError → wait 30s
+g4dn.xlarge attempt 2 → success!
+```
+
+### Race mode
+
+All types are raced simultaneously. If the entire round fails with capacity errors, wait and race again:
+
+```
+Race round 1: [g5, g4dn] both submitted → both fail with capacity → wait 30s
+Race round 2: [g5, g4dn] both submitted → g4dn wins!
+```
+
+If a round fails with only quota errors (no capacity errors), it does NOT retry — waiting won't change quotas.
+
+### Cross-region + retry
+
+Retries apply within each region. If all retries are exhausted in region 1, the SDK moves to region 2 and starts fresh:
+
+```
+us-east-1: g5 attempt 1 → capacity → wait 30s → attempt 2 → capacity → exhausted
+us-east-1: g4dn attempt 1 → capacity → wait 30s → attempt 2 → capacity → exhausted
+→ Moving to us-west-2
+us-west-2: g5 attempt 1 → success!
+```
+
+### Naming convention
+
+The SageMaker Pipelines retry policy uses `IntervalSeconds`, `BackoffRate`, and `MaxAttempts`. Our SDK uses `BackoffBase`, `BackoffMultiplier`, and `MaxRetries` — same semantics, slightly different names to avoid confusion with the Pipelines-specific context.
+
 ## prepare_regions Utility
 
 Standalone utility for one-time cross-region infrastructure setup:
@@ -468,6 +552,9 @@ Accepts all boto3 `create_transform_job` PascalCase parameters, plus:
 | `WorkloadDescription` | `str` | None | Natural-language workload description for Bedrock-powered AI expansion. |
 | `RegionConfig` | `dict` | None | Per-region configuration. Keys are region names, values are dicts with optional `ModelName`. |
 | `AutoCreateModel` | `bool` | `False` | When `True`, the SDK auto-creates a SageMaker Model in target regions during cross-region fallback. |
+| `MaxRetries` | `int` | `0` | Max retry attempts on capacity errors. `0` = no retries (default). Per-type for sequential, per-round for race. |
+| `BackoffBase` | `int` | `30` | Seconds before the first retry attempt. |
+| `BackoffMultiplier` | `float` | `2.0` | Exponential multiplier for retry intervals (30s, 60s, 120s, ...). |
 
 `TransformResources.InstanceType` is enhanced to accept either a `str` (scalar) or `list[str]` (priority list).
 
@@ -587,7 +674,7 @@ Batch Transform does not support spot instances. Billing is per-second from `Tra
 ```bash
 cd sm-resilient-launcher
 
-# Run all 243 unit tests
+# Run all 253 unit tests
 pytest tests/ -v
 
 # Run with coverage
