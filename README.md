@@ -22,6 +22,21 @@ This SDK wraps boto3's `create_transform_job` to provide five behaviors — all 
 
 Migration from native boto3 requires changing a single import. With no SDK parameters, behavior is identical to boto3.
 
+## Strategies
+
+| Strategy | Value | How it works | Best for |
+|---|---|---|---|
+| **Passthrough** | `"passthrough"` or omit all SDK params | Direct boto3 call. Zero SDK logic. Returns raw API dict. | Drop-in replacement, testing, when you don't need resilience |
+| **Sequential** | `"sequential"` | Tries instance types one at a time in your exact order. Supports retry with exponential backoff on capacity errors. | Controlled fallback with predictable cost. Most common. |
+| **Race** | `"race"` | Submits ALL types simultaneously. First to complete wins, rest are cancelled. Supports retry rounds on all-capacity failures. | Fastest time-to-result when you can tolerate brief parallel billing |
+| **Intelligent** | `"intelligent"` | Calls Bedrock AI (if `WorkloadDescription` provided) or uses deterministic GPU metadata to generate a prioritized fallback list. Then executes with the AI-recommended sub-strategy (sequential or race). | When you have a single type and want the SDK to find alternatives |
+
+Notes:
+- **Passthrough** is the default when no SDK params are present — this makes the SDK a true drop-in for boto3.
+- **Intelligent** is triggered automatically when you provide a single instance type with `WorkloadDescription` and no explicit Strategy. You can also request it explicitly with `Strategy="intelligent"`.
+- **Sequential** and **Race** both support `MaxRetries` / `BackoffBase` / `BackoffMultiplier` for capacity error retries.
+- All strategies (except passthrough) work with `AllowedRegions` for cross-region fallback.
+
 ## Installation
 
 ### From GitLab (recommended)
@@ -172,7 +187,7 @@ result = launch_create_transform_job(
 print(f"Landed in {result.region_used}: {result.instance_type_used}")
 ```
 
-### 6. AI-Powered Instance Selection (Bedrock)
+### 6. AI-Powered Instance Selection (Strategy="intelligent")
 
 ```python
 result = launch_create_transform_job(
@@ -183,7 +198,8 @@ result = launch_create_transform_job(
     TransformResources={"InstanceType": "ml.g4dn.xlarge", "InstanceCount": 1},
     WorkloadDescription="ResNet-50 inference, fp32, ~200MB GPU memory, cost-sensitive",
 )
-# Single type + WorkloadDescription → Bedrock generates a prioritized fallback list.
+# Single type + WorkloadDescription → triggers intelligent strategy.
+# Also available explicitly: Strategy="intelligent"
 # Filters to types with quota > 0, reasons about GPU memory fit and cost.
 print(result.agent_reasoning)
 # "ml.g4dn.xlarge is cheapest with sufficient GPU memory. Priority:
@@ -231,10 +247,11 @@ result = launch_create_transform_job(
 
     # ── SDK-specific parameters ───────────────────────────────────────
 
-    Strategy="race",                           # "passthrough" | "sequential" | "race"
+    Strategy="race",                           # "passthrough" | "sequential" | "race" | "intelligent"
                                                #   passthrough  — direct boto3 call, zero SDK logic
                                                #   sequential   — try types in order
                                                #   race         — all types in parallel, first wins
+                                               #   intelligent  — AI expands type list, picks strategy
                                                #   (default: passthrough when no SDK params present)
 
     MaxRetries=3,                              # int  — retry attempts on capacity errors (default: 0)
@@ -670,7 +687,7 @@ Accepts all boto3 `create_transform_job` PascalCase parameters, plus:
 
 | SDK Parameter | Type | Default | Description |
 |---|---|---|---|
-| `Strategy` | `str` | `"passthrough"` | `"passthrough"`, `"sequential"`, or `"race"`. Default is passthrough when no SDK params are present (true drop-in). |
+| `Strategy` | `str` | `"passthrough"` | `"passthrough"`, `"sequential"`, `"race"`, or `"intelligent"`. Default is passthrough when no SDK params are present. |
 | `AllowedRegions` | `list[str]` | None | AWS regions for cross-region fallback. First region is the home region. |
 | `WorkloadDescription` | `str` | None | Natural-language workload description for Bedrock-powered AI expansion. |
 | `RegionConfig` | `dict` | None | Per-region configuration. Keys are region names, values are dicts with optional `ModelName`. |
