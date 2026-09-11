@@ -1,10 +1,11 @@
 """Launcher — job-type-agnostic orchestrator applying the behavior matrix.
 
 Strategies:
-  - passthrough:  handled upstream in the entry point (not here)
-  - sequential:   try types in order, one at a time
-  - race:         submit all types in parallel, first to complete wins
-  - intelligent:  AI-powered type expansion + recommended strategy
+  - passthrough:   handled upstream in the entry point (not here)
+  - sequential:    try types in order, one at a time
+  - race:          submit all types in parallel, first to complete wins
+  - intelligent:   MUST be explicit. Bedrock AI (with fallback to
+                   TypeExpander if Bedrock fails) or TypeExpander alone.
 
 Contains NO Batch Transform-specific logic — works through the
 ``JobAdapter`` interface exclusively.
@@ -34,16 +35,7 @@ _RETRY_ONLY_PARAMS = {"MaxRetries", "BackoffBase", "BackoffMultiplier"}
 
 
 class Launcher:
-    """Job-type-agnostic orchestrator for capacity-resilient launches.
-
-    Strategies:
-      passthrough   — handled upstream (entry point), not here
-      sequential    — try types in caller's order, one at a time
-      race          — all types in parallel, first wins, rest cancelled
-      intelligent   — Bedrock AI (if WorkloadDescription) or TypeExpander
-                      generates a prioritized fallback list, then executes
-                      with the AI-recommended sub-strategy (sequential/race)
-    """
+    """Job-type-agnostic orchestrator for capacity-resilient launches."""
 
     def __init__(
         self,
@@ -76,7 +68,6 @@ class Launcher:
             "TransformJobName", "sm-resilient"
         )
 
-        # Retry / backoff params
         max_retries = sdk_params.get("MaxRetries", 0)
         backoff_base = sdk_params.get("BackoffBase", 30)
         backoff_multiplier = sdk_params.get("BackoffMultiplier", 2.0)
@@ -84,11 +75,7 @@ class Launcher:
         agent_reasoning: str | None = None
         is_single = len(instance_types) == 1
 
-        # Check if the only SDK params present are retry-related.
-        non_retry_params = set(sdk_params.keys()) - _RETRY_ONLY_PARAMS
-        has_only_retry_params = len(non_retry_params) == 0
-
-        # ── Handle Strategy="intelligent" explicitly ──────────
+        # ── Handle Strategy="intelligent" (MUST be explicit) ──────
         if strategy == "intelligent":
             instance_types, strategy, agent_reasoning = (
                 self._run_intelligent_expansion(
@@ -98,8 +85,10 @@ class Launcher:
                 )
             )
 
-        # ── Behavior matrix for single type with no explicit strategy ──
+        # ── No explicit strategy + single type → infer ────────────
         elif is_single and strategy is None:
+            non_retry_params = set(sdk_params.keys()) - _RETRY_ONLY_PARAMS
+            has_only_retry_params = len(non_retry_params) == 0
             has_multi_region = (
                 allowed_regions is not None and len(allowed_regions) > 1
             )
@@ -109,19 +98,9 @@ class Launcher:
             elif has_only_retry_params:
                 # Only retry params → sequential with this one type.
                 strategy = "sequential"
-            elif workload_desc and self._intelligent_router:
-                # WorkloadDescription triggers intelligent expansion.
-                instance_types, strategy, agent_reasoning = (
-                    self._run_intelligent_expansion(
-                        instance_types[0], workload_desc, region
-                    )
-                )
-            elif self._type_expander:
-                instance_types = self._type_expander.expand(
-                    instance_types[0], region
-                )
-                strategy = "sequential"
             else:
+                # Other SDK params present but no explicit strategy →
+                # sequential with this one type (no implicit AI).
                 strategy = "sequential"
 
         # Default strategy for list mode.
@@ -167,23 +146,39 @@ class Launcher:
         workload_desc: str | None,
         region: str,
     ) -> tuple[list[str], str, str | None]:
-        """Run AI or deterministic type expansion.
+        """Run AI type expansion with fallback to TypeExpander.
+
+        Flow:
+          1. If WorkloadDescription present → try Bedrock (IntelligentRouter)
+          2. If Bedrock fails (permissions, errors) → fall back to TypeExpander
+          3. If no WorkloadDescription → go straight to TypeExpander
 
         Returns:
-            (expanded_types, recommended_strategy, reasoning_or_none)
+            (expanded_types, execution_strategy, reasoning_or_none)
         """
+        # Try Bedrock first if WorkloadDescription is present
         if workload_desc and self._intelligent_router:
-            ordered_types, rec_strategy, reasoning = (
-                self._intelligent_router.generate_plan(
-                    original_type, workload_desc
+            try:
+                ordered_types, rec_strategy, reasoning = (
+                    self._intelligent_router.generate_plan(
+                        original_type, workload_desc
+                    )
                 )
-            )
-            return ordered_types, rec_strategy, reasoning
-        elif self._type_expander:
+                return ordered_types, rec_strategy, reasoning
+            except Exception as exc:
+                logger.warning(
+                    "Bedrock call failed (%s); falling back to TypeExpander",
+                    str(exc)[:80],
+                )
+                # Fall through to TypeExpander
+
+        # TypeExpander (deterministic, no AI, no permissions needed)
+        if self._type_expander:
             expanded = self._type_expander.expand(original_type, region)
             return expanded, "sequential", None
-        else:
-            return [original_type], "sequential", None
+
+        # No expander available — just use the original type
+        return [original_type], "sequential", None
 
     def _execute_single_region(
         self,
@@ -196,7 +191,6 @@ class Launcher:
         backoff_base: int = 30,
         backoff_multiplier: float = 2.0,
     ) -> LaunchResult:
-        """Delegate to the strategy engine for a single region."""
         engine = self._build_engine(
             strategy, self._adapter, max_retries, backoff_base, backoff_multiplier
         )
@@ -220,7 +214,6 @@ class Launcher:
         backoff_base: int = 30,
         backoff_multiplier: float = 2.0,
     ) -> LaunchResult:
-        """Delegate to CrossRegionManager for multi-region fallback."""
         home_region = allowed_regions[0]
         manager = CrossRegionManager(
             adapter_factory=self._adapter_factory,
@@ -245,21 +238,16 @@ class Launcher:
         backoff_base: int = 30,
         backoff_multiplier: float = 2.0,
     ) -> SequentialEngine | RaceEngine:
-        """Instantiate the strategy engine with retry params."""
         if strategy == "sequential":
             return SequentialEngine(
-                adapter,
-                self._classifier,
-                max_retries=max_retries,
-                backoff_base=backoff_base,
+                adapter, self._classifier,
+                max_retries=max_retries, backoff_base=backoff_base,
                 backoff_multiplier=backoff_multiplier,
             )
         elif strategy == "race":
             return RaceEngine(
-                adapter,
-                self._classifier,
-                max_retries=max_retries,
-                backoff_base=backoff_base,
+                adapter, self._classifier,
+                max_retries=max_retries, backoff_base=backoff_base,
                 backoff_multiplier=backoff_multiplier,
             )
         else:

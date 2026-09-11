@@ -96,7 +96,7 @@ class TestScalarAIExpansionWithWorkload:
         result = launcher.launch(
             instance_types=["ml.g5.4xlarge"],
             boto3_params=BOTO3_PARAMS,
-            sdk_params={"WorkloadDescription": "ResNet-50 inference"},
+            sdk_params={"Strategy": "intelligent", "WorkloadDescription": "ResNet-50 inference"},
             region="us-east-1",
         )
 
@@ -133,7 +133,7 @@ class TestScalarAIExpansionWithWorkload:
         result = launcher.launch(
             instance_types=["ml.g5.4xlarge"],
             boto3_params=BOTO3_PARAMS,
-            sdk_params={"WorkloadDescription": "LLM inference"},
+            sdk_params={"Strategy": "intelligent", "WorkloadDescription": "LLM inference"},
             region="us-east-1",
         )
 
@@ -168,7 +168,7 @@ class TestScalarAIExpansionWithWorkload:
             result = launcher.launch(
                 instance_types=["ml.g5.4xlarge"],
                 boto3_params=BOTO3_PARAMS,
-                sdk_params={"WorkloadDescription": "quick inference"},
+                sdk_params={"Strategy": "intelligent", "WorkloadDescription": "quick inference"},
                 region="us-east-1",
             )
             mock_race.assert_called_once()
@@ -209,7 +209,7 @@ class TestScalarAIExpansionWithoutWorkload:
         result = launcher.launch(
             instance_types=["ml.g5.4xlarge"],
             boto3_params=BOTO3_PARAMS,
-            sdk_params={"AutoCreateModel": False},
+            sdk_params={"Strategy": "intelligent"},
             region="us-east-1",
         )
 
@@ -717,7 +717,7 @@ class TestSingleAllowedRegion:
         # CrossRegionManager should NOT have been instantiated.
         MockCRM.assert_not_called()
         # TypeExpander should be called (scalar, single region, no strategy).
-        type_expander.expand.assert_called_once()
+        type_expander.expand.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

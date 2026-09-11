@@ -29,11 +29,11 @@ Migration from native boto3 requires changing a single import. With no SDK param
 | **Passthrough** | `"passthrough"` or omit all SDK params | Direct boto3 call. Zero SDK logic. Returns raw API dict. | Drop-in replacement, testing, when you don't need resilience |
 | **Sequential** | `"sequential"` | Tries instance types one at a time in your exact order. Supports retry with exponential backoff on capacity errors. | Controlled fallback with predictable cost. Most common. |
 | **Race** | `"race"` | Submits ALL types simultaneously. First to complete wins, rest are cancelled. Supports retry rounds on all-capacity failures. | Fastest time-to-result when you can tolerate brief parallel billing |
-| **Intelligent** | `"intelligent"` | Calls Bedrock AI (if `WorkloadDescription` provided) or uses deterministic GPU metadata to generate a prioritized fallback list. Then executes with the AI-recommended sub-strategy (sequential or race). | When you have a single type and want the SDK to find alternatives |
+| **Intelligent** | `"intelligent"` | **Must be explicit.** If `WorkloadDescription` provided → tries Bedrock AI first, falls back to TypeExpander on failure. Without `WorkloadDescription` → TypeExpander directly. Generates a prioritized fallback list, then executes with AI-recommended sub-strategy. | When you want the SDK to find alternative instance types |
 
 Notes:
 - **Passthrough** is the default when no SDK params are present — this makes the SDK a true drop-in for boto3.
-- **Intelligent** is triggered automatically when you provide a single instance type with `WorkloadDescription` and no explicit Strategy. You can also request it explicitly with `Strategy="intelligent"`.
+- **Intelligent** must be explicitly set with `Strategy="intelligent"`. It is never triggered automatically. If `WorkloadDescription` is provided, Bedrock AI is tried first; if that fails (permissions, errors), it falls back to deterministic TypeExpander.
 - **Sequential** and **Race** both support `MaxRetries` / `BackoffBase` / `BackoffMultiplier` for capacity error retries.
 - All strategies (except passthrough) work with `AllowedRegions` for cross-region fallback.
 
@@ -199,7 +199,8 @@ result = launch_create_transform_job(
     WorkloadDescription="ResNet-50 inference, fp32, ~200MB GPU memory, cost-sensitive",
 )
 # Single type + WorkloadDescription → triggers intelligent strategy.
-# Also available explicitly: Strategy="intelligent"
+# Strategy="intelligent" must be explicit.
+# Bedrock tried first; falls back to TypeExpander if Bedrock fails.
 # Filters to types with quota > 0, reasons about GPU memory fit and cost.
 print(result.agent_reasoning)
 # "ml.g4dn.xlarge is cheapest with sufficient GPU memory. Priority:
@@ -403,9 +404,9 @@ The SDK infers the correct behavior from the shape of your input:
 
 2. **No SDK params at all + single type**: Passthrough. The call goes directly to boto3 with zero SDK logic. This is the default — making the SDK a true drop-in replacement for `boto3.client("sagemaker").create_transform_job()`.
 
-3. **Single type + retry params only**: Sequential with that one type and exponential backoff retries. No type expansion, no AI. The customer said "retry my type."
+3. **Single type + retry params only**: Sequential with that one type and exponential backoff retries. No type expansion, no AI.
 
-4. **Single type + WorkloadDescription**: The SDK expands the single instance type into a fallback list. If `WorkloadDescription` is provided, the `IntelligentRouter` calls Bedrock Converse with deterministic quota/pricing facts to reason about GPU memory fit. Otherwise, the `TypeExpander` generates the list using hardcoded GPU metadata (same-or-larger types, filtered by non-zero quota). The expanded list is executed via sequential fallback.
+4. **Strategy="intelligent" (explicit)**: Bedrock AI (if `WorkloadDescription`) or TypeExpander generates a prioritized list. Bedrock is tried first when `WorkloadDescription` is provided. If Bedrock fails (permissions, quota, errors), falls back to TypeExpander (deterministic GPU metadata, same-or-larger types). The expanded list is executed with the AI-recommended sub-strategy.
 
 5. **List input or explicit Strategy**: The caller's list is used in exact order. No AI expansion, no reordering. The specified (or defaulted) strategy engine executes the list.
 
