@@ -1,4 +1,4 @@
-# SageMaker Capacity-Resilient Job Launcher
+# SageMaker TransformJob Capacity-Resilient Launcher
 
 Automatic capacity fallback across instance types and AWS regions for SageMaker Batch Transform. One import change from native boto3.
 
