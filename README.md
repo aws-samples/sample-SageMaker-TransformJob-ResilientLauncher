@@ -674,7 +674,7 @@ Batch Transform does not support spot instances. Billing is per-second from `Tra
 ```bash
 cd sm-resilient-launcher
 
-# Run all 253 unit tests
+# Run all 256 unit tests
 pytest tests/ -v
 
 # Run with coverage
@@ -691,7 +691,7 @@ All unit tests use fully mocked boto3 clients with zero real AWS API calls.
 
 ### Integration Testing (Real AWS)
 
-The integration test script runs real Batch Transform jobs against an AWS account:
+Integration tests are not included in the repository (they require specific AWS account setup). To run integration tests:
 
 ```bash
 # Run all 7 integration tests
@@ -741,19 +741,7 @@ sm-resilient-launcher/
     _launch_result.py           # LaunchResult dataclass
     _prepare_regions.py         # prepare_regions utility
     _exceptions.py              # AllTypesExhaustedError, AllRegionsExhaustedError
-  tests/
-    test_param_separator.py
-    test_transform_adapter.py
-    test_sequential_engine.py
-    test_race_engine.py
-    test_intelligent_router.py
-    test_launcher.py
-    test_entry_point.py
-    test_cross_region_manager.py
-    test_prepare_regions.py
-    test_quota_fetcher.py
-    integration/
-      test_real_aws.py          # Real AWS integration tests
+
 ```
 
 ## License

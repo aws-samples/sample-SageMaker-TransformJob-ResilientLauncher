@@ -39,3 +39,6 @@ htmlcov/
 
 # Demo scripts (not shipped)
 demo/
+
+# Integration tests (require real AWS credentials)
+tests/integration/
