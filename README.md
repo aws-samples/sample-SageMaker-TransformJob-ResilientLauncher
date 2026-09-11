@@ -27,18 +27,17 @@ Four strategies control how the SDK handles your job — set via the `Strategy` 
 - **Sequential**, **Race**, and **Intelligent** all support `MaxRetries` / `BackoffBase` / `BackoffMultiplier` for capacity error retries. Only **Passthrough** has no retries.
 - All strategies (except passthrough) combine with `AllowedRegions` for cross-region fallback.
 
+All strategies (except passthrough) support exponential backoff retries on capacity errors:
+
+| Parameter | Default | Description |
+|---|---|---|
+| `MaxRetries` | `0` | Retry attempts on capacity errors. `0` = no retries. |
+| `BackoffBase` | `30` | Seconds before first retry. |
+| `BackoffMultiplier` | `2.0` | Each retry doubles the wait (30s → 60s → 120s). |
+
+Only **capacity errors** are retried (hardware may free up). Quota and configuration errors skip immediately.
+
 Migration from native boto3 requires changing a single import. With no SDK parameters, behavior is identical to boto3.
-
-### How retries interact with strategies
-
-| Scenario | What happens |
-|---|---|
-| Single type + `MaxRetries` only (no Strategy) | **Sequential with retries** on that one type. Not passthrough — the SDK retries the same type with backoff. |
-| `Strategy="sequential"` + `MaxRetries` | Each type in the list is retried individually before moving to the next. |
-| `Strategy="race"` + `MaxRetries` | All types raced. If entire round fails with capacity errors, wait and race again. |
-| `Strategy="intelligent"` + `MaxRetries` | AI generates the type list, then executes with sequential or race (AI's choice), retries apply. |
-| `Strategy="passthrough"` + `MaxRetries` | **MaxRetries is ignored.** Passthrough = raw boto3, no SDK logic. |
-| No SDK params at all | **Passthrough.** No retries, no SDK logic. |
 
 ### Common Usage Patterns
 
@@ -657,6 +656,17 @@ Every SageMaker API error is classified into exactly one of four categories usin
 ## Retry with Exponential Backoff
 
 SageMaker Batch Transform hard-fails in ~40 seconds when capacity is unavailable. Unlike SageMaker Pipelines (which has built-in retry policies), standalone `create_transform_job` calls have no retry mechanism. This SDK fills that gap.
+
+### How retries interact with strategies
+
+| Scenario | What happens |
+|---|---|
+| Single type + `MaxRetries` only (no Strategy) | **Sequential with retries** on that one type. Not passthrough — the SDK retries the same type with backoff. |
+| `Strategy="sequential"` + `MaxRetries` | Each type in the list is retried individually before moving to the next. |
+| `Strategy="race"` + `MaxRetries` | All types raced. If entire round fails with capacity errors, wait and race again. |
+| `Strategy="intelligent"` + `MaxRetries` | AI generates the type list, then executes with sequential or race (AI's choice), retries apply. |
+| `Strategy="passthrough"` + `MaxRetries` | **MaxRetries is ignored.** Passthrough = raw boto3, no SDK logic. |
+| No SDK params at all | **Passthrough.** No retries, no SDK logic. |
 
 ### How it works
 
