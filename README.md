@@ -15,7 +15,7 @@ This SDK wraps boto3's `create_transform_job` to provide five behaviors — all 
 | Behavior | When | What Happens |
 |---|---|---|
 | **Native Passthrough** | `Strategy="passthrough"` | Direct boto3 call, zero SDK logic, returns raw dict |
-| **AI Expansion** | Scalar type, no Strategy | TypeExpander (deterministic) or Bedrock Converse generates a same-or-larger fallback list |
+| **AI Expansion** | Single type, no Strategy | TypeExpander (deterministic) or Bedrock Converse generates a same-or-larger fallback list |
 | **Sequential Fallback** | List of types or `Strategy="sequential"` | Types tried in order; error classification drives skip behavior |
 | **Race (Parallel)** | `Strategy="race"` | All types submitted concurrently; first to provision wins, losers cancelled |
 | **Cross-Region** | `AllowedRegions` with 2+ regions | Falls back to other regions when the home region is exhausted |
@@ -66,9 +66,14 @@ pip install -e libs/sm-resilient-launcher
 
 ## Quick Start
 
-### 1. Native Passthrough — identical to boto3
+### 1. Drop-in replacement — default passthrough (identical to boto3)
 
 ```python
+# Before (native boto3):
+# client = boto3.client("sagemaker")
+# client.create_transform_job(TransformJobName="my-job", ...)
+
+# After (just change the import — behavior is identical):
 from sm_resilient_launcher import launch_create_transform_job
 
 result = launch_create_transform_job(
@@ -80,43 +85,12 @@ result = launch_create_transform_job(
     },
     TransformOutput={"S3OutputPath": "s3://bucket/output"},
     TransformResources={"InstanceType": "ml.g5.4xlarge", "InstanceCount": 1},
-    Strategy="passthrough",
 )
-# Returns the raw boto3 dict — zero SDK logic applied.
+# No SDK params → passthrough to boto3. Returns the raw API dict.
+# You can also set Strategy="passthrough" explicitly for the same effect.
 ```
 
-### 2. AI Expansion — SDK generates fallback list
-
-```python
-result = launch_create_transform_job(
-    TransformJobName="my-job",
-    ModelName="my-model",
-    TransformInput={...},
-    TransformOutput={...},
-    TransformResources={"InstanceType": "ml.g4dn.xlarge", "InstanceCount": 1},
-)
-# No Strategy, no WorkloadDescription — TypeExpander generates same-or-larger types.
-# SDK tries ml.g4dn.xlarge first, then g4dn.2xlarge, g5.xlarge, etc.
-print(f"Landed on {result.instance_type_used} after {result.attempts} attempts")
-```
-
-With Bedrock-powered reasoning:
-
-```python
-result = launch_create_transform_job(
-    TransformJobName="my-job",
-    ModelName="my-model",
-    TransformInput={...},
-    TransformOutput={...},
-    TransformResources={"InstanceType": "ml.g4dn.xlarge", "InstanceCount": 1},
-    WorkloadDescription="ResNet-50 inference, fp32, ~200MB GPU memory, cost-sensitive",
-)
-print(result.agent_reasoning)
-# "ResNet-50 fp32 needs ~200MB. All G-family types fit. g4dn.xlarge cheapest.
-#  Priority: ml.g4dn.xlarge, ml.g4dn.2xlarge, ml.g5.xlarge."
-```
-
-### 3. Sequential Fallback — explicit priority list
+### 2. Sequential Fallback — explicit priority list
 
 ```python
 result = launch_create_transform_job(
@@ -128,12 +102,14 @@ result = launch_create_transform_job(
         "InstanceType": ["ml.g5.4xlarge", "ml.g4dn.2xlarge", "ml.g4dn.xlarge"],
         "InstanceCount": 1,
     },
-    Strategy="sequential",
+    Strategy="sequential",  # tries types in your exact order
 )
-# Tries types in your exact order. Never reorders your list.
+# g5.4xlarge fails → g4dn.2xlarge fails → g4dn.xlarge succeeds
+# Never reorders your list.
+print(f"Landed on {result.instance_type_used} after {result.attempts} attempts")
 ```
 
-### 4. Race Mode — parallel submission
+### 3. Race Mode — parallel submission
 
 ```python
 result = launch_create_transform_job(
@@ -145,10 +121,31 @@ result = launch_create_transform_job(
         "InstanceType": ["ml.g4dn.xlarge", "ml.g5.xlarge"],
         "InstanceCount": 1,
     },
-    Strategy="race",
+    Strategy="race",  # all submitted in parallel
 )
-# Both submitted in parallel. First to provision wins.
-# Losers are cancelled — jobs that never reach TransformStartTime cost $0.
+# First to complete wins. Losers are cancelled immediately.
+# Jobs that never reach TransformStartTime cost $0.
+print(f"Winner: {result.instance_type_used}")
+```
+
+### 4. Retry with Exponential Backoff
+
+```python
+result = launch_create_transform_job(
+    TransformJobName="my-job",
+    ModelName="my-model",
+    TransformInput={...},
+    TransformOutput={...},
+    TransformResources={
+        "InstanceType": ["ml.g5.4xlarge", "ml.g4dn.xlarge"],
+        "InstanceCount": 1,
+    },
+    Strategy="sequential",
+    MaxRetries=3,           # retry each type up to 3x on capacity errors
+    BackoffBase=30,         # first wait: 30s (default)
+    BackoffMultiplier=2.0,  # exponential: 30s, 60s, 120s (default)
+)
+# Only capacity errors are retried. Quota errors skip immediately.
 ```
 
 ### 5. Cross-Region Resilience
@@ -159,11 +156,38 @@ result = launch_create_transform_job(
     ModelName="my-model",
     TransformInput={...},
     TransformOutput={...},
-    TransformResources={"InstanceType": "ml.g4dn.xlarge", "InstanceCount": 1},
+    TransformResources={
+        "InstanceType": ["ml.g5.4xlarge", "ml.g4dn.xlarge"],
+        "InstanceCount": 1,
+    },
+    Strategy="race",
     AllowedRegions=["us-east-1", "us-west-2", "eu-west-1"],
-    AutoCreateModel=True,  # SDK creates the SageMaker Model in target regions
+    RegionConfig={
+        "us-west-2": {"ModelName": "my-model-usw2"},
+        "eu-west-1": {"ModelName": "my-model-euw1"},
+    },
 )
-print(f"Landed in {result.region_used}, data_replicated={result.data_replicated}")
+# Races all types in us-east-1. If all fail, falls back to us-west-2, then eu-west-1.
+# S3 data is auto-replicated to target regions.
+print(f"Landed in {result.region_used}: {result.instance_type_used}")
+```
+
+### 6. AI-Powered Instance Selection (Bedrock)
+
+```python
+result = launch_create_transform_job(
+    TransformJobName="my-job",
+    ModelName="my-model",
+    TransformInput={...},
+    TransformOutput={...},
+    TransformResources={"InstanceType": "ml.g4dn.xlarge", "InstanceCount": 1},
+    WorkloadDescription="ResNet-50 inference, fp32, ~200MB GPU memory, cost-sensitive",
+)
+# Single type + WorkloadDescription → Bedrock generates a prioritized fallback list.
+# Filters to types with quota > 0, reasons about GPU memory fit and cost.
+print(result.agent_reasoning)
+# "ml.g4dn.xlarge is cheapest with sufficient GPU memory. Priority:
+#  ml.g4dn.xlarge, ml.g5.xlarge, ml.g4dn.2xlarge, ml.g5.4xlarge."
 ```
 
 ## Architecture
@@ -178,7 +202,7 @@ print(f"Landed in {result.region_used}, data_replicated={result.data_replicated}
 |                        ParamSeparator                            |
 |   Splits SDK params (Strategy, AllowedRegions, WorkloadDesc,     |
 |   RegionConfig, AutoCreateModel) from boto3 params.              |
-|   Detects scalar vs list InstanceType.                           |
+|   Detects single vs list InstanceType.                           |
 +------------------------------+-----------------------------------+
                                |
               +----------------v-----------------+
@@ -193,7 +217,7 @@ print(f"Landed in {result.region_used}, data_replicated={result.data_replicated}
     +---------------+   |      |      |
                +--------v------v--+   |
                |   AI Expansion   |   |
-               |  (scalar mode)   |   |
+               |  (single-type mode)   |   |
                +--+------------+--+   |
                   |            |      |
      +------------v--+  +-----v------v------------------+
@@ -252,10 +276,10 @@ The SDK infers the correct behavior from the shape of your input:
 
 | InstanceType Shape | Strategy Param | AllowedRegions | Behavior |
 |---|---|---|---|
-| Scalar string | absent | absent or 1 region | **Passthrough** (no SDK params) or **AI Expansion** (if `WorkloadDescription` or `MaxRetries` present). Default = passthrough = identical to boto3. |
-| Scalar string | absent | 2+ regions | **Cross-region** with single type, sequential per region. |
-| Scalar string | explicit (not passthrough) | any | Execute specified strategy with the single type. |
-| Scalar string | `"passthrough"` | any | **Native passthrough.** Direct boto3. Zero SDK logic. |
+| Single instance type | absent | absent or 1 region | **Passthrough** (no SDK params) or **AI Expansion** (if `WorkloadDescription` or `MaxRetries` present). Default = passthrough = identical to boto3. |
+| Single instance type | absent | 2+ regions | **Cross-region** with single type, sequential per region. |
+| Single instance type | explicit (not passthrough) | any | Execute specified strategy with the single type. |
+| Single instance type | `"passthrough"` | any | **Native passthrough.** Direct boto3. Zero SDK logic. |
 | List | absent | any | **Sequential** with caller's list in exact order. |
 | List | explicit | any | Execute specified strategy with caller's list in exact order. |
 
@@ -265,9 +289,9 @@ The SDK infers the correct behavior from the shape of your input:
 
 1. **Passthrough** (`Strategy="passthrough"`): Handled first. The request is forwarded directly to boto3 with zero SDK logic, zero retry, zero error classification. Returns the raw boto3 API response as a `dict`.
 
-2. **No SDK params at all + scalar type**: Passthrough. The call goes directly to boto3 with zero SDK logic. This is the default — making the SDK a true drop-in replacement for `boto3.client("sagemaker").create_transform_job()`.
+2. **No SDK params at all + single type**: Passthrough. The call goes directly to boto3 with zero SDK logic. This is the default — making the SDK a true drop-in replacement for `boto3.client("sagemaker").create_transform_job()`.
 
-3. **Scalar input + SDK params present (no explicit Strategy)**: The SDK expands the single instance type into a fallback list. If `WorkloadDescription` is provided, the `IntelligentRouter` calls Bedrock Converse with deterministic quota/pricing facts to reason about GPU memory fit. Otherwise, the `TypeExpander` generates the list using hardcoded GPU metadata (same-or-larger types, filtered by non-zero quota). The expanded list is executed via sequential fallback.
+3. **Single type + SDK params present (no explicit Strategy)**: The SDK expands the single instance type into a fallback list. If `WorkloadDescription` is provided, the `IntelligentRouter` calls Bedrock Converse with deterministic quota/pricing facts to reason about GPU memory fit. Otherwise, the `TypeExpander` generates the list using hardcoded GPU metadata (same-or-larger types, filtered by non-zero quota). The expanded list is executed via sequential fallback.
 
 4. **List input or explicit Strategy**: The caller's list is used in exact order. No AI expansion, no reordering. The specified (or defaulted) strategy engine executes the list.
 
@@ -558,7 +582,7 @@ Accepts all boto3 `create_transform_job` PascalCase parameters, plus:
 | `BackoffBase` | `int` | `30` | Seconds before the first retry attempt. |
 | `BackoffMultiplier` | `float` | `2.0` | Exponential multiplier for retry intervals (30s, 60s, 120s, ...). |
 
-`TransformResources.InstanceType` is enhanced to accept either a `str` (scalar) or `list[str]` (priority list).
+`TransformResources.InstanceType` is enhanced to accept either a `str` (single type) or `list[str]` (priority list).
 
 **Returns:** `LaunchResult` for non-passthrough paths, or a raw `dict` for passthrough.
 
