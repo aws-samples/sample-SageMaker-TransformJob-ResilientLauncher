@@ -27,7 +27,7 @@ Four strategies control how the SDK handles your job — set via the `Strategy` 
 - **Sequential**, **Race**, and **Intelligent** all support `MaxRetries` / `BackoffBase` / `BackoffMultiplier` for capacity error retries. Only **Passthrough** has no retries.
 - All strategies (except passthrough) combine with `AllowedRegions` for cross-region fallback.
 
-All strategies (except passthrough) support exponential backoff retries on capacity errors:
+Adding any retry parameter activates the SDK (no longer passthrough). Retries work with all strategies:
 
 | Parameter | Default | Description |
 |---|---|---|
