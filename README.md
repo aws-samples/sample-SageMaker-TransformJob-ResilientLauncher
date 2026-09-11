@@ -371,7 +371,7 @@ The SDK infers the correct behavior from the shape of your input:
 
 | InstanceType Shape | Strategy Param | AllowedRegions | Behavior |
 |---|---|---|---|
-| Single instance type | absent | absent or 1 region | **Passthrough** (no SDK params) or **AI Expansion** (if `WorkloadDescription` or `MaxRetries` present). Default = passthrough = identical to boto3. |
+| Single instance type | absent | absent or 1 region | **Passthrough** (no SDK params). **Sequential with retries** (if only `MaxRetries`/`BackoffBase`/`BackoffMultiplier`). **AI Expansion** (if `WorkloadDescription`). Default = passthrough = identical to boto3. |
 | Single instance type | absent | 2+ regions | **Cross-region** with single type, sequential per region. |
 | Single instance type | explicit (not passthrough) | any | Execute specified strategy with the single type. |
 | Single instance type | `"passthrough"` | any | **Native passthrough.** Direct boto3. Zero SDK logic. |
@@ -386,11 +386,13 @@ The SDK infers the correct behavior from the shape of your input:
 
 2. **No SDK params at all + single type**: Passthrough. The call goes directly to boto3 with zero SDK logic. This is the default — making the SDK a true drop-in replacement for `boto3.client("sagemaker").create_transform_job()`.
 
-3. **Single type + SDK params present (no explicit Strategy)**: The SDK expands the single instance type into a fallback list. If `WorkloadDescription` is provided, the `IntelligentRouter` calls Bedrock Converse with deterministic quota/pricing facts to reason about GPU memory fit. Otherwise, the `TypeExpander` generates the list using hardcoded GPU metadata (same-or-larger types, filtered by non-zero quota). The expanded list is executed via sequential fallback.
+3. **Single type + retry params only**: Sequential with that one type and exponential backoff retries. No type expansion, no AI. The customer said "retry my type."
 
-4. **List input or explicit Strategy**: The caller's list is used in exact order. No AI expansion, no reordering. The specified (or defaulted) strategy engine executes the list.
+4. **Single type + WorkloadDescription**: The SDK expands the single instance type into a fallback list. If `WorkloadDescription` is provided, the `IntelligentRouter` calls Bedrock Converse with deterministic quota/pricing facts to reason about GPU memory fit. Otherwise, the `TypeExpander` generates the list using hardcoded GPU metadata (same-or-larger types, filtered by non-zero quota). The expanded list is executed via sequential fallback.
 
-5. **Cross-region**: When `AllowedRegions` contains 2+ regions, the `CrossRegionManager` tries each region in order. Pre-flight checks, data replication, and output retrieval are handled automatically.
+5. **List input or explicit Strategy**: The caller's list is used in exact order. No AI expansion, no reordering. The specified (or defaulted) strategy engine executes the list.
+
+6. **Cross-region**: When `AllowedRegions` contains 2+ regions, the `CrossRegionManager` tries each region in order. Pre-flight checks, data replication, and output retrieval are handled automatically.
 
 ## Cross-Region Deep Dive
 

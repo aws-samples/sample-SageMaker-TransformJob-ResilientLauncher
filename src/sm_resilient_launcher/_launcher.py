@@ -25,17 +25,21 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Params that only control retry behavior — they don't trigger
+# type expansion or AI routing.
+_RETRY_ONLY_PARAMS = {"MaxRetries", "BackoffBase", "BackoffMultiplier"}
+
 
 class Launcher:
     """Job-type-agnostic orchestrator for capacity-resilient launches.
 
-    Applies the behavior matrix:
+    Behavior matrix for single instance type with no explicit Strategy:
 
-    - Scalar + no Strategy + no/single region -> AI Expansion -> sequential
-    - Scalar + no Strategy + multi-region -> cross-region with single type
-    - Scalar + explicit Strategy -> execute strategy with single type
-    - List + no Strategy -> sequential with caller's order
-    - List + explicit Strategy -> execute strategy with caller's order
+    1. Only retry params (MaxRetries, BackoffBase, BackoffMultiplier)
+       → sequential with that single type + retries. No expansion.
+    2. WorkloadDescription present → IntelligentRouter (Bedrock AI).
+    3. AllowedRegions (2+) → cross-region with single type.
+    4. Otherwise → TypeExpander (deterministic expansion).
 
     Passthrough is handled upstream in the entry point, not here.
     """
@@ -77,17 +81,29 @@ class Launcher:
         backoff_multiplier = sdk_params.get("BackoffMultiplier", 2.0)
 
         agent_reasoning: str | None = None
-        is_scalar = len(instance_types) == 1
+        is_single = len(instance_types) == 1
 
-        # ── Behavior matrix for scalar input with no explicit strategy ──
-        if is_scalar and strategy is None:
+        # Check if the only SDK params present are retry-related.
+        # If so, the customer just wants retries on their single type —
+        # no AI expansion, no type expansion.
+        non_retry_params = set(sdk_params.keys()) - _RETRY_ONLY_PARAMS
+        has_only_retry_params = len(non_retry_params) == 0
+
+        # ── Behavior matrix for single type with no explicit strategy ──
+        if is_single and strategy is None:
             has_multi_region = (
                 allowed_regions is not None and len(allowed_regions) > 1
             )
 
             if has_multi_region:
+                # Cross-region with single type.
+                strategy = "sequential"
+            elif has_only_retry_params:
+                # Only retry params → sequential with this one type.
+                # No expansion. Customer said "retry my type."
                 strategy = "sequential"
             elif workload_desc and self._intelligent_router:
+                # Bedrock AI expansion.
                 ordered_types, rec_strategy, reasoning = (
                     self._intelligent_router.generate_plan(
                         instance_types[0], workload_desc
@@ -97,6 +113,7 @@ class Launcher:
                 strategy = rec_strategy
                 agent_reasoning = reasoning
             elif self._type_expander:
+                # Deterministic expansion (same-or-larger types).
                 instance_types = self._type_expander.expand(
                     instance_types[0], region
                 )
@@ -104,6 +121,7 @@ class Launcher:
             else:
                 strategy = "sequential"
 
+        # Default strategy for list mode.
         if strategy is None:
             strategy = "sequential"
 
