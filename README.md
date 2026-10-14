@@ -983,6 +983,10 @@ sm-resilient-launcher/
 
 ```
 
+## Disclaimer
+
+This library is provided as-is for non-production use. It is not an officially supported AWS product. You should evaluate it against your own security, regulatory, and compliance requirements before using it in production workloads.
+
 ## License
 
 This project is licensed under the Apache License 2.0 — see the [LICENSE](LICENSE) file for details.
