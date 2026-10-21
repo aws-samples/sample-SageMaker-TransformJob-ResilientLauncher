@@ -130,8 +130,8 @@ launch_create_transform_job(
 
 ```bash
 # Clone the repository
-git clone https://github.com/aws-samples/sagemaker-batch-transform-capacity-resilience.git
-cd sagemaker-batch-transform-capacity-resilience
+git clone https://github.com/aws-samples/sample-SageMaker-TransformJob-ResilientLauncher.git
+cd sample-SageMaker-TransformJob-ResilientLauncher
 
 # Install the sample library
 pip install -e .
@@ -145,7 +145,7 @@ pip install -e ".[dev]"
 Add to your `requirements.txt`:
 
 ```
-sm-resilient-launcher @ git+https://github.com/aws-samples/sagemaker-batch-transform-capacity-resilience.git
+sm-resilient-launcher @ git+https://github.com/aws-samples/sample-SageMaker-TransformJob-ResilientLauncher.git
 ```
 
 Or in `pyproject.toml`:
@@ -153,14 +153,14 @@ Or in `pyproject.toml`:
 ```toml
 [project]
 dependencies = [
-    "sm-resilient-launcher @ git+https://github.com/aws-samples/sagemaker-batch-transform-capacity-resilience.git",
+    "sm-resilient-launcher @ git+https://github.com/aws-samples/sample-SageMaker-TransformJob-ResilientLauncher.git",
 ]
 ```
 
 ### As a git submodule (for monorepos)
 
 ```bash
-git submodule add https://github.com/aws-samples/sagemaker-batch-transform-capacity-resilience.git libs/sm-resilient-launcher
+git submodule add https://github.com/aws-samples/sample-SageMaker-TransformJob-ResilientLauncher.git libs/sm-resilient-launcher
 pip install -e libs/sm-resilient-launcher
 ```
 
