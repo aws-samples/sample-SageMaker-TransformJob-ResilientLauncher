@@ -1,6 +1,6 @@
 # SageMaker TransformJob Capacity-Resilient Launcher
 
-Automatic capacity fallback across instance types and AWS regions for SageMaker Batch Transform. One import change from native boto3.
+Sample reference library demonstrating capacity resilience patterns for SageMaker Batch Transform: instance-type fallback, parallel racing, cross-region failover, exponential backoff retries, and AI-powered instance selection.
 
 ## The Problem
 
@@ -10,7 +10,7 @@ GPU batch workloads require manual resubmission with different instance types un
 
 ## The Solution
 
-This SDK wraps boto3's `create_transform_job` to provide automatic capacity resilience — accessible through a single function that uses the exact same PascalCase parameter names as the native API.
+This sample library demonstrates how to build automatic capacity resilience around boto3's `create_transform_job` — accessible through a single function that uses the exact same PascalCase parameter names as the native API. Customers can use, adapt, or extend these patterns for their own workloads.
 
 Four strategies control how the SDK handles your job — set via the `Strategy` parameter:
 
@@ -19,10 +19,10 @@ Four strategies control how the SDK handles your job — set via the `Strategy` 
 | **Passthrough** | `"passthrough"` or omit all SDK params | Direct boto3 call. Zero SDK logic. Returns raw API dict. | Drop-in replacement, testing |
 | **Sequential** | `"sequential"` | Tries instance types one at a time in your exact order. Supports retry with exponential backoff on capacity errors. | Controlled fallback, predictable cost |
 | **Race** | `"race"` | Submits ALL types simultaneously. First to complete wins, rest cancelled. Supports retry rounds. | Fastest time-to-result |
-| **Intelligent** | `"intelligent"` | **Must be explicit.** With `WorkloadDescription` → Bedrock AI (falls back to TypeExpander on failure). Without → TypeExpander (deterministic). Generates a prioritized list, then executes with AI-recommended sub-strategy. | SDK finds alternative types for you |
+| **Intelligent** | `"intelligent"` | **Must be explicit.** With `WorkloadDescription` → Bedrock AI (falls back to TypeExpander on failure). Without → TypeExpander (deterministic). Generates a prioritized list, then executes with AI-recommended sub-strategy. | Sample finds alternative types for you |
 
 **Key rules:**
-- **Passthrough** is the default when no SDK params are present — true drop-in for boto3.
+- **Passthrough** is the default when no extra params are present — identical to boto3.
 - **Intelligent** must be explicitly set. It is never triggered automatically.
 - **Sequential**, **Race**, and **Intelligent** all support `MaxRetries` / `BackoffBase` / `BackoffMultiplier` for capacity error retries. Only **Passthrough** has no retries.
 - All strategies (except passthrough) combine with `AllowedRegions` for cross-region fallback.
@@ -37,7 +37,7 @@ Adding any retry parameter activates the SDK (no longer passthrough). Retries wo
 
 Only **capacity errors** are retried (hardware may free up). Quota and configuration errors skip immediately.
 
-Migration from native boto3 requires changing a single import. With no SDK parameters, behavior is identical to boto3.
+Adopting the sample requires changing a single import. With no additional parameters, behavior is identical to native boto3.
 
 ### Common Usage Patterns
 
@@ -126,17 +126,17 @@ launch_create_transform_job(
 
 ## Installation
 
-### From GitLab (recommended)
+### From the repository
 
 ```bash
 # Clone the repository
 git clone git@ssh.gitlab.aws.dev:supcasa/Sagemaker_Batch_Resilient_Launcher.git
 cd Sagemaker_Batch_Resilient_Launcher
 
-# Install the package
+# Install the sample library
 pip install -e .
 
-# Install with dev dependencies (pytest, hypothesis)
+# Install with dev dependencies for running tests
 pip install -e ".[dev]"
 ```
 
@@ -164,18 +164,18 @@ git submodule add git@ssh.gitlab.aws.dev:supcasa/Sagemaker_Batch_Resilient_Launc
 pip install -e libs/sm-resilient-launcher
 ```
 
-**Requirements:** Python >= 3.10, `boto3`, `botocore`
+**Requirements:** Python >= 3.10, `boto3>=1.26.0`, `botocore>=1.29.0`
 
 ## Quick Start
 
-### 1. Drop-in replacement — default passthrough (identical to boto3)
+### 1. Default behavior — passthrough (identical to boto3)
 
 ```python
 # Before (native boto3):
 # client = boto3.client("sagemaker")
 # client.create_transform_job(TransformJobName="my-job", ...)
 
-# After (just change the import — behavior is identical):
+# After (just change the import — same behavior):
 from sm_resilient_launcher import launch_create_transform_job
 
 result = launch_create_transform_job(
@@ -188,7 +188,7 @@ result = launch_create_transform_job(
     TransformOutput={"S3OutputPath": "s3://bucket/output"},
     TransformResources={"InstanceType": "ml.g5.4xlarge", "InstanceCount": 1},
 )
-# No SDK params → passthrough to boto3. Returns the raw API dict.
+# No extra params → passthrough to boto3. Returns the raw API dict.
 # You can also set Strategy="passthrough" explicitly for the same effect.
 ```
 
@@ -448,7 +448,7 @@ print(result.warnings)              # list[str] — pre-flight warnings
       |  S3 mirror buckets, ECR warning,       |
       |  IAM validate, AutoCreateModel,        |
       |  data replication, output retrieval,    |
-      |  SDK tags                              |
+      |  Resource tags                              |
       +------------+--------------------------+
                    |
       +------------v--------------------------+
@@ -483,7 +483,7 @@ The SDK infers the correct behavior from the shape of your input:
 | List | absent | any | **Sequential** with caller's list in exact order. |
 | List | explicit | any | Execute specified strategy with caller's list in exact order. |
 
-**Invariant:** The SDK never reorders, removes from, or modifies a caller-provided instance priority list.
+**Invariant:** The sample never reorders, removes from, or modifies a caller-provided instance priority list.
 
 ## Strategy Selection Logic
 
@@ -565,7 +565,7 @@ The auto-created model:
 - ModelDataUrl: Rewritten to mirror bucket S3 path.
 - ExecutionRoleArn: Same (IAM is global).
 - Environment: Preserved from the source model.
-- Tags: SDK tags applied.
+- Tags: Resource tags applied.
 
 Created models are cached per region — no re-creation on retry.
 
@@ -612,7 +612,7 @@ AWS-managed algorithm account IDs are maintained for 15 regions: us-east-1, us-e
 
 Mirror bucket naming: `{original-bucket}-{target-region}`. Created automatically if it doesn't exist.
 
-### SDK tags on all created resources
+### Resource tags on all created resources
 
 All resources created by the SDK are tagged:
 
@@ -661,7 +661,7 @@ SageMaker Batch Transform hard-fails in ~40 seconds when capacity is unavailable
 
 | Scenario | What happens |
 |---|---|
-| Single type + `MaxRetries` only (no Strategy) | **Sequential with retries** on that one type. Not passthrough — the SDK retries the same type with backoff. |
+| Single type + `MaxRetries` only (no Strategy) | **Sequential with retries** on that one type. Not passthrough — the sample retries the same type with backoff. |
 | `Strategy="sequential"` + `MaxRetries` | Each type in the list is retried individually before moving to the next. |
 | `Strategy="race"` + `MaxRetries` | All types raced. If entire round fails with capacity errors, wait and race again. |
 | `Strategy="intelligent"` + `MaxRetries` | AI generates the type list, then executes with sequential or race (AI's choice), retries apply. |
@@ -784,7 +784,7 @@ When `auto_create_model=True`, the utility additionally checks whether auto-crea
 
 Accepts all boto3 `create_transform_job` PascalCase parameters, plus:
 
-| SDK Parameter | Type | Default | Description |
+| Parameter | Type | Default | Description |
 |---|---|---|---|
 | `Strategy` | `str` | `"passthrough"` | `"passthrough"`, `"sequential"`, `"race"`, or `"intelligent"`. Default is passthrough when no SDK params are present. |
 | `AllowedRegions` | `list[str]` | None | AWS regions for cross-region fallback. First region is the home region. |
@@ -801,7 +801,7 @@ Accepts all boto3 `create_transform_job` PascalCase parameters, plus:
 
 **Raises:** `AllTypesExhaustedError`, `AllRegionsExhaustedError`
 
-Unrecognized parameters are passed through to boto3 unchanged — the SDK never rejects unknown keys and remains forward-compatible with new API parameters.
+Unrecognized parameters are passed through to boto3 unchanged — the sample never rejects unknown keys and remains forward-compatible with new API parameters.
 
 ### LaunchResult Fields
 
@@ -858,7 +858,7 @@ except AllRegionsExhaustedError as e:
 
 ## Extensibility — JobAdapter ABC
 
-The SDK uses an abstract `JobAdapter` base class so that Batch Transform-specific logic is isolated in `TransformJobAdapter`. The Launcher, SequentialEngine, RaceEngine, and CrossRegionManager interact with jobs exclusively through this interface.
+The sample uses an abstract `JobAdapter` base class so that Batch Transform-specific logic is isolated in `TransformJobAdapter`. The Launcher, SequentialEngine, RaceEngine, and CrossRegionManager interact with jobs exclusively through this interface.
 
 To add Training Job support, implement `TrainingJobAdapter` and a new `launch_create_training_job` entry point. No modifications needed to the strategy engines, cross-region manager, or orchestration logic.
 
@@ -896,7 +896,7 @@ class TrainingJobAdapter(JobAdapter):
 
 - **SageMaker Model name collisions**: `AutoCreateModel` uses the pattern `{model_name}-{region}`. If a model with that name already exists in the target region, the `CreateModel` call will fail and the SDK will skip that region.
 
-- **SDK tag cleanup**: The SDK tags all created resources but does not clean them up after jobs complete. Use tag-based S3 lifecycle policies or manual cleanup for mirror buckets and copied objects.
+- **SDK tag cleanup**: The Resource tags all created resources but does not clean them up after jobs complete. Use tag-based S3 lifecycle policies or manual cleanup for mirror buckets and copied objects.
 
 ## Billing Model
 
@@ -985,7 +985,7 @@ sm-resilient-launcher/
 
 ## Disclaimer
 
-This library is provided as-is for non-production use. It is not an officially supported AWS product. You should evaluate it against your own security, regulatory, and compliance requirements before using it in production workloads.
+This sample library is provided as-is and is intended for demonstration and reference purposes. It is not an officially supported AWS product or service. You should evaluate, test, and adapt this code against your own security, regulatory, and compliance requirements before using it in production workloads.
 
 ## License
 
