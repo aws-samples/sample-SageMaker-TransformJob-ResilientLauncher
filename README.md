@@ -4,7 +4,7 @@ Sample reference library demonstrating capacity resilience patterns for SageMake
 
 ## The Problem
 
-SageMaker's `CreateTransformJob` API accepts a single instance type per request. When that type has no capacity, the job hard-fails in approximately 40 seconds. There is no built-in fallback list, no cross-region retry, and no automatic resubmission. Instance pools (the AWS-native solution) only cover real-time endpoints — Batch Transform and Training Jobs are not covered.
+SageMaker's `CreateTransformJob` API accepts a single instance type per request. When that type has no capacity, the job hard-fails in approximately 40 seconds. There is no built-in fallback list, no cross-region retry, and no automatic resubmission. Instance pools cover real-time endpoints, and AWS recently introduced Instance Preference Lists for Training and Processing Jobs — but Batch Transform remains without a native fallback mechanism.
 
 GPU batch workloads require manual resubmission with different instance types until something sticks, and cross-region failover requires manual S3 data replication and job reconfiguration.
 
