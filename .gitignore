@@ -42,3 +42,4 @@ demo/
 
 # Integration tests (require real AWS credentials)
 tests/integration/
+blog-builder-center.md
